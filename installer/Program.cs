@@ -32,13 +32,16 @@ internal static class Program
 
 public sealed class InstallerForm : Form
 {
+    private const string AppFolderName = "OBS Karaoke MVP";
     private const string RemoteManifestUrl =
         "https://github.com/tobi31231/obs-karaoke/releases/latest/download/release-manifest.json";
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromHours(2) };
-    private static readonly string InstallDirectory =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OBS Karaoke MVP");
+    private static readonly string DefaultInstallDirectory =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppFolderName);
 
     private readonly Label _status = new();
+    private readonly TextBox _installPath = new();
+    private readonly Button _browse = new();
     private readonly ProgressBar _progress = new();
     private readonly Button _install = new();
     private readonly Button _cancel = new();
@@ -49,8 +52,8 @@ public sealed class InstallerForm : Form
         Text = "OBS Karaoke MVP 설치";
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScroll = true;
-        ClientSize = new Size(680, 360);
-        MinimumSize = new Size(560, 320);
+        ClientSize = new Size(720, 430);
+        MinimumSize = new Size(600, 390);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
@@ -60,10 +63,12 @@ public sealed class InstallerForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 7,
             Padding = new Padding(28)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -83,7 +88,34 @@ public sealed class InstallerForm : Form
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 18)
         };
-        _status.Text = $"설치 위치: {InstallDirectory}";
+
+        var pathLabel = new Label
+        {
+            Text = "설치 폴더",
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, 7)
+        };
+        _installPath.Text = DefaultInstallDirectory;
+        _installPath.Dock = DockStyle.Fill;
+        _installPath.Margin = new Padding(0, 3, 8, 3);
+        _browse.Text = "찾아보기...";
+        _browse.AutoSize = true;
+        _browse.MinimumSize = new Size(112, 32);
+        _browse.Click += (_, _) => ChooseInstallDirectory();
+
+        var pathRow = new TableLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            Margin = new Padding(0, 0, 0, 14)
+        };
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        pathRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pathRow.Controls.Add(_installPath, 0, 0);
+        pathRow.Controls.Add(_browse, 1, 0);
+
+        _status.Text = "설치 버튼을 누르면 필요한 파일을 내려받습니다.";
         _status.AutoEllipsis = true;
         _status.Dock = DockStyle.Fill;
         _status.TextAlign = ContentAlignment.MiddleLeft;
@@ -114,13 +146,96 @@ public sealed class InstallerForm : Form
 
         layout.Controls.Add(title, 0, 0);
         layout.Controls.Add(description, 0, 1);
-        layout.Controls.Add(_status, 0, 2);
-        layout.Controls.Add(_progress, 0, 3);
-        layout.Controls.Add(buttonRow, 0, 4);
+        layout.Controls.Add(pathLabel, 0, 2);
+        layout.Controls.Add(pathRow, 0, 3);
+        layout.Controls.Add(_status, 0, 4);
+        layout.Controls.Add(_progress, 0, 5);
+        layout.Controls.Add(buttonRow, 0, 6);
         Controls.Add(layout);
 
         AcceptButton = _install;
         CancelButton = _cancel;
+    }
+
+    private void ChooseInstallDirectory()
+    {
+        var initialDirectory = FindExistingDirectory(_installPath.Text) ??
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = $"설치할 위치를 선택하세요. 선택한 위치 안에 {AppFolderName} 폴더가 생성됩니다.",
+            UseDescriptionForTitle = true,
+            SelectedPath = initialDirectory,
+            ShowNewFolderButton = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        var selected = Path.GetFullPath(dialog.SelectedPath);
+        _installPath.Text = string.Equals(
+            Path.GetFileName(Path.TrimEndingDirectorySeparator(selected)),
+            AppFolderName,
+            StringComparison.OrdinalIgnoreCase)
+            ? selected
+            : Path.Combine(selected, AppFolderName);
+        _status.Text = $"설치 위치: {_installPath.Text}";
+    }
+
+    private static string? FindExistingDirectory(string path)
+    {
+        try
+        {
+            var candidate = Environment.ExpandEnvironmentVariables(path.Trim());
+            while (!string.IsNullOrWhiteSpace(candidate))
+            {
+                if (Directory.Exists(candidate)) return Path.GetFullPath(candidate);
+                candidate = Path.GetDirectoryName(candidate);
+            }
+        }
+        catch
+        {
+            // The typed path will be validated when installation starts.
+        }
+        return null;
+    }
+
+    private string ResolveInstallDirectory()
+    {
+        var value = Environment.ExpandEnvironmentVariables(_installPath.Text.Trim());
+        if (string.IsNullOrWhiteSpace(value))
+            throw new InvalidDataException("설치 폴더를 입력하세요.");
+
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(value));
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root) || string.Equals(
+            fullPath,
+            Path.TrimEndingDirectorySeparator(root),
+            StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("드라이브 최상위 경로에는 직접 설치할 수 없습니다.");
+        }
+
+        if (Directory.Exists(fullPath) && Directory.EnumerateFileSystemEntries(fullPath).Any())
+        {
+            var existingExecutable = Path.Combine(fullPath, "OBS Karaoke MVP.exe");
+            var existingServer = Path.Combine(fullPath, "server.js");
+            if (!File.Exists(existingExecutable) || !File.Exists(existingServer))
+            {
+                throw new InvalidDataException(
+                    "선택한 폴더에 다른 파일이 있습니다. 비어 있는 폴더나 기존 OBS Karaoke MVP 설치 폴더를 선택하세요.");
+            }
+        }
+
+        return fullPath;
+    }
+
+    private static string CreateStagingDirectory(string installDirectory)
+    {
+        var parent = Directory.GetParent(installDirectory)?.FullName
+            ?? throw new InvalidDataException("설치 폴더의 상위 경로를 확인할 수 없습니다.");
+        Directory.CreateDirectory(parent);
+        var staging = Path.Combine(parent, $".{AppFolderName}.installing-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(staging);
+        return staging;
     }
 
     internal static async Task VerifyLocalAssetsAsync()
@@ -160,19 +275,30 @@ public sealed class InstallerForm : Form
 
     private async Task InstallAsync()
     {
+        string installDirectory;
+        try
+        {
+            installDirectory = ResolveInstallDirectory();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         _cancellation = new CancellationTokenSource();
         _install.Enabled = false;
+        _installPath.Enabled = false;
+        _browse.Enabled = false;
         _cancel.Text = "취소";
         _progress.Style = ProgressBarStyle.Marquee;
 
-        var staging = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            $"OBS Karaoke MVP.installing-{Guid.NewGuid():N}");
+        string? staging = null;
         var downloadDirectory = Path.Combine(Path.GetTempPath(), $"obs-karaoke-setup-{Guid.NewGuid():N}");
 
         try
         {
-            Directory.CreateDirectory(staging);
+            staging = CreateStagingDirectory(installDirectory);
             Directory.CreateDirectory(downloadDirectory);
             var (manifest, manifestUri) = await LoadManifestAsync(_cancellation.Token);
 
@@ -193,19 +319,20 @@ public sealed class InstallerForm : Form
             }
 
             _status.Text = "설치 마무리 중...";
-            InstallStagingDirectory(staging);
-            CreateDesktopShortcut();
+            InstallStagingDirectory(staging, installDirectory);
+            staging = null;
+            CreateDesktopShortcut(installDirectory);
             _progress.Style = ProgressBarStyle.Continuous;
             _progress.Value = 100;
-            _status.Text = $"설치 완료: {manifest.Version}";
+            _status.Text = $"설치 완료: {manifest.Version}\r\n{installDirectory}";
             _cancel.Text = "닫기";
             _cancellation.Dispose();
             _cancellation = null;
 
             Process.Start(new ProcessStartInfo
             {
-                FileName = Path.Combine(InstallDirectory, "OBS Karaoke MVP.exe"),
-                WorkingDirectory = InstallDirectory,
+                FileName = Path.Combine(installDirectory, "OBS Karaoke MVP.exe"),
+                WorkingDirectory = installDirectory,
                 UseShellExecute = true
             });
         }
@@ -224,11 +351,13 @@ public sealed class InstallerForm : Form
         }
         finally
         {
-            TryDeleteDirectory(staging);
+            if (staging is not null) TryDeleteDirectory(staging);
             TryDeleteDirectory(downloadDirectory);
             _cancellation?.Dispose();
             _cancellation = null;
             _install.Enabled = true;
+            _installPath.Enabled = true;
+            _browse.Enabled = true;
             _cancel.Text = "닫기";
         }
     }
@@ -347,31 +476,31 @@ public sealed class InstallerForm : Form
         }
     }
 
-    private static void InstallStagingDirectory(string staging)
+    private static void InstallStagingDirectory(string staging, string installDirectory)
     {
-        var backup = InstallDirectory + ".old";
+        var backup = installDirectory + ".old";
         TryDeleteDirectory(backup);
-        if (Directory.Exists(InstallDirectory))
+        if (Directory.Exists(installDirectory))
         {
-            Directory.Move(InstallDirectory, backup);
+            Directory.Move(installDirectory, backup);
         }
 
         try
         {
-            Directory.Move(staging, InstallDirectory);
+            Directory.Move(staging, installDirectory);
             TryDeleteDirectory(backup);
         }
         catch
         {
-            if (!Directory.Exists(InstallDirectory) && Directory.Exists(backup))
+            if (!Directory.Exists(installDirectory) && Directory.Exists(backup))
             {
-                Directory.Move(backup, InstallDirectory);
+                Directory.Move(backup, installDirectory);
             }
             throw;
         }
     }
 
-    private static void CreateDesktopShortcut()
+    private static void CreateDesktopShortcut(string installDirectory)
     {
         var shortcutPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
@@ -386,8 +515,8 @@ public sealed class InstallerForm : Form
             dynamic dynamicShell = shell!;
             shortcut = dynamicShell.CreateShortcut(shortcutPath);
             dynamic dynamicShortcut = shortcut;
-            dynamicShortcut.TargetPath = Path.Combine(InstallDirectory, "OBS Karaoke MVP.exe");
-            dynamicShortcut.WorkingDirectory = InstallDirectory;
+            dynamicShortcut.TargetPath = Path.Combine(installDirectory, "OBS Karaoke MVP.exe");
+            dynamicShortcut.WorkingDirectory = installDirectory;
             dynamicShortcut.Description = "OBS Karaoke MVP";
             dynamicShortcut.Save();
         }
