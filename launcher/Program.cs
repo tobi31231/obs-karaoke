@@ -36,36 +36,54 @@ public sealed class LauncherForm : Form
     public LauncherForm()
     {
         Text = "OBS Karaoke MVP";
-        Width = 520;
-        Height = 280;
-        MinimumSize = new Size(480, 260);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScroll = true;
+        ClientSize = new Size(760, 430);
+        MinimumSize = new Size(620, 380);
         StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
+        SizeGripStyle = SizeGripStyle.Show;
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 6,
+            Padding = new Padding(28)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var title = new Label
         {
             Text = "OBS Karaoke MVP",
             Font = new Font(Font.FontFamily, 16, FontStyle.Bold),
             AutoSize = true,
-            Location = new Point(20, 18)
+            Margin = new Padding(0, 0, 0, 12)
         };
 
         _status.Text = "로컬 서버를 시작하는 중입니다...";
         _status.AutoSize = false;
-        _status.Width = 460;
-        _status.Height = 48;
-        _status.Location = new Point(22, 58);
+        _status.Dock = DockStyle.Fill;
+        _status.TextAlign = ContentAlignment.MiddleLeft;
+        _status.MinimumSize = new Size(0, 110);
+        _status.Margin = new Padding(0, 0, 0, 18);
 
         _openApp.Text = "조작 화면으로 가기";
-        _openApp.Location = new Point(22, 124);
-        _openApp.Size = new Size(140, 34);
+        _openApp.Dock = DockStyle.Fill;
+        _openApp.MinimumSize = new Size(0, 42);
         _openApp.Enabled = false;
         _openApp.Click += (_, _) => OpenControlPage();
 
         _copyOverlay.Text = "Overlay 주소 복사";
-        _copyOverlay.Location = new Point(176, 124);
-        _copyOverlay.Size = new Size(150, 34);
+        _copyOverlay.Dock = DockStyle.Fill;
+        _copyOverlay.MinimumSize = new Size(0, 42);
         _copyOverlay.Click += (_, _) =>
         {
             Clipboard.SetText(OverlayUrl);
@@ -73,24 +91,60 @@ public sealed class LauncherForm : Form
         };
 
         _installModel.Text = "Turbo 모델 설치";
-        _installModel.Location = new Point(340, 124);
-        _installModel.Size = new Size(140, 34);
+        _installModel.Dock = DockStyle.Fill;
+        _installModel.MinimumSize = new Size(0, 42);
         _installModel.Click += (_, _) => RunBatch("install-turbo-model.bat");
+
+        var buttonRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 3,
+            Margin = new Padding(0, 0, 0, 18)
+        };
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
+        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334f));
+        buttonRow.Controls.Add(_openApp, 0, 0);
+        buttonRow.Controls.Add(_copyOverlay, 1, 0);
+        buttonRow.Controls.Add(_installModel, 2, 0);
+
+        var overlayLabel = new Label
+        {
+            Text = "OBS Browser Source URL",
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, 7)
+        };
 
         var overlay = new TextBox
         {
             Text = OverlayUrl,
             ReadOnly = true,
-            Location = new Point(22, 176),
-            Width = 458
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 0, 18)
         };
 
         _stop.Text = "종료";
-        _stop.Location = new Point(380, 206);
-        _stop.Size = new Size(100, 30);
+        _stop.Size = new Size(110, 38);
         _stop.Click += (_, _) => Close();
 
-        Controls.AddRange([title, _status, _openApp, _copyOverlay, _installModel, overlay, _stop]);
+        var bottomRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Margin = new Padding(0)
+        };
+        bottomRow.Controls.Add(_stop);
+
+        layout.Controls.Add(title, 0, 0);
+        layout.Controls.Add(_status, 0, 1);
+        layout.Controls.Add(buttonRow, 0, 2);
+        layout.Controls.Add(overlayLabel, 0, 3);
+        layout.Controls.Add(overlay, 0, 4);
+        layout.Controls.Add(bottomRow, 0, 5);
+        Controls.Add(layout);
 
         var trayOpen = new ToolStripMenuItem("조작 화면 열기");
         trayOpen.Click += (_, _) => OpenControlPage();

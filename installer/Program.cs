@@ -47,45 +47,80 @@ public sealed class InstallerForm : Form
     public InstallerForm()
     {
         Text = "OBS Karaoke MVP 설치";
-        Width = 560;
-        Height = 260;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScroll = true;
+        ClientSize = new Size(680, 360);
+        MinimumSize = new Size(560, 320);
         StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
+        SizeGripStyle = SizeGripStyle.Show;
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 5,
+            Padding = new Padding(28)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var title = new Label
         {
             Text = "OBS Karaoke MVP",
             Font = new Font(Font.FontFamily, 17, FontStyle.Bold),
             AutoSize = true,
-            Location = new Point(24, 22)
+            Margin = new Padding(0, 0, 0, 8)
         };
         var description = new Label
         {
             Text = "Turbo 모델과 로컬 실행 환경을 설치합니다.",
             AutoSize = true,
-            Location = new Point(27, 61)
+            Margin = new Padding(0, 0, 0, 18)
         };
         _status.Text = $"설치 위치: {InstallDirectory}";
         _status.AutoEllipsis = true;
-        _status.Location = new Point(27, 96);
-        _status.Size = new Size(500, 38);
-        _progress.Location = new Point(27, 139);
-        _progress.Size = new Size(500, 22);
+        _status.Dock = DockStyle.Fill;
+        _status.TextAlign = ContentAlignment.MiddleLeft;
+        _status.MinimumSize = new Size(0, 72);
+        _status.Margin = new Padding(0, 0, 0, 14);
+        _progress.Dock = DockStyle.Fill;
+        _progress.Margin = new Padding(0, 3, 0, 7);
         _install.Text = "설치";
-        _install.Location = new Point(339, 177);
-        _install.Size = new Size(90, 32);
+        _install.Size = new Size(110, 38);
         _install.Click += async (_, _) => await InstallAsync();
         _cancel.Text = "닫기";
-        _cancel.Location = new Point(437, 177);
-        _cancel.Size = new Size(90, 32);
+        _cancel.Size = new Size(110, 38);
         _cancel.Click += (_, _) =>
         {
             if (_cancellation is null) Close();
             else _cancellation.Cancel();
         };
 
-        Controls.AddRange([title, description, _status, _progress, _install, _cancel]);
+        var buttonRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Margin = new Padding(0, 16, 0, 0)
+        };
+        buttonRow.Controls.AddRange([_cancel, _install]);
+
+        layout.Controls.Add(title, 0, 0);
+        layout.Controls.Add(description, 0, 1);
+        layout.Controls.Add(_status, 0, 2);
+        layout.Controls.Add(_progress, 0, 3);
+        layout.Controls.Add(buttonRow, 0, 4);
+        Controls.Add(layout);
+
+        AcceptButton = _install;
+        CancelButton = _cancel;
     }
 
     internal static async Task VerifyLocalAssetsAsync()
