@@ -252,7 +252,10 @@ public sealed class InstallerForm : Form
         using var response = await Http.GetAsync(RemoteManifestUrl, cancellationToken);
         response.EnsureSuccessStatusCode();
         var content = await response.Content.ReadAsStringAsync(cancellationToken);
-        return (DeserializeManifest(content), response.RequestMessage?.RequestUri ?? new Uri(RemoteManifestUrl));
+
+        // GitHub redirects the manifest to a signed CDN URL that is valid for
+        // that file only. Build sibling asset URLs from the stable Release URL.
+        return (DeserializeManifest(content), new Uri(RemoteManifestUrl));
     }
 
     private static ReleaseManifest DeserializeManifest(string json)
