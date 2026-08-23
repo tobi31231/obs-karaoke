@@ -36,6 +36,18 @@ function Reset-Directory([string]$Path) {
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
 }
 
+function Remove-GeneratedCaches([string]$Root) {
+    $cacheDirectories = Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force |
+        Where-Object { $_.Name -in @("__pycache__", ".cache") } |
+        Sort-Object { $_.FullName.Length } -Descending
+
+    foreach ($directory in $cacheDirectories) {
+        if (Test-Path -LiteralPath $directory.FullName) {
+            Remove-Item -LiteralPath $directory.FullName -Recurse -Force
+        }
+    }
+}
+
 function Copy-Tree([string]$Source, [string]$Destination, [string[]]$Excluded = @()) {
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     $arguments = @($Source, $Destination, "/E", "/COPY:DAT", "/DCOPY:DAT", "/R:1", "/W:1",
@@ -63,6 +75,10 @@ Copy-Tree $PortablePath $coreStaging @(
 )
 Copy-Tree (Join-Path $PortablePath "models") (Join-Path $modelStaging "models")
 Copy-Tree (Join-Path $PortablePath "runtime") (Join-Path $cudaStaging "runtime")
+
+Remove-GeneratedCaches $coreStaging
+Remove-GeneratedCaches $modelStaging
+Remove-GeneratedCaches $cudaStaging
 
 $assetDefinitions = @(
     @{ Name = "obs-karaoke-app-core-win-x64.zip"; Source = $coreStaging },

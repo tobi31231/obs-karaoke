@@ -9,6 +9,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Remove-GeneratedCaches([string]$Root) {
+    $cacheDirectories = Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force |
+        Where-Object { $_.Name -in @("__pycache__", ".cache") } |
+        Sort-Object { $_.FullName.Length } -Descending
+
+    foreach ($directory in $cacheDirectories) {
+        if (Test-Path -LiteralPath $directory.FullName) {
+            Remove-Item -LiteralPath $directory.FullName -Recurse -Force
+        }
+    }
+}
+
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $workspace = (Resolve-Path (Join-Path $repo "..")).Path
 if (-not $OutputDirectory) {
@@ -64,5 +77,7 @@ if ($LASTEXITCODE -ge 8) { throw "CUDA copy failed with code $LASTEXITCODE" }
 $python = Join-Path $OutputDirectory "python\python.exe"
 & $python (Join-Path $OutputDirectory "work\model_align.py") --check
 if ($LASTEXITCODE -ne 0) { throw "Packaged model environment check failed." }
+
+Remove-GeneratedCaches $OutputDirectory
 
 Write-Host "Portable package ready: $OutputDirectory"
