@@ -1,0 +1,40 @@
+name: source-checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check server.js
+          node --check public/app.js
+          node --check public/overlay.js
+
+      - name: Check Python syntax
+        run: python -m py_compile work/model_align.py work/download_model.py work/download_cuda_runtime.py
+
+      - name: Build launchers
+        shell: pwsh
+        run: |
+          dotnet build launcher/ObsKaraokeLauncher.csproj -c Release
+          dotnet build installer/ObsKaraokeSetup.csproj -c Release

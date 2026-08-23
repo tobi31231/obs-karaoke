@@ -1,0 +1,47 @@
+# Release and build outputs
+build/
+release/
+dist/
+outputs/
+
+# Bundled runtimes and models
+models/
+python/
+runtime/
+node.exe
+
+# Generated alignment data and uploads
+work/*
+!work/model_align.py
+!work/download_model.py
+!work/download_cuda_runtime.py
+
+# .NET outputs
+**/bin/
+**/obj/
+*.pdb
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.log
+
+# Test media and lyrics
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.aac
+*.ogg
+*.mp4
+*.mov
+*.mkv
+*.lrc
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
+.idea/

@@ -1,0 +1,12 @@
+{
+  "name": "obs-karaoke-aligner-mvp",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "description": "Local OBS karaoke subtitle MVP with browser-based line timing and transparent overlay.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

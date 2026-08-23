@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OBS Karaoke MVP</title>
+    <link rel="stylesheet" href="/styles.css?v=20260823-mismatch-cancel-1" />
+  </head>
+  <body class="app-shell">
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local OBS Karaoke</p>
+          <h1>자동 노래방 자막 MVP</h1>
+        </div>
+        <div class="overlay-link">
+          <label for="overlayUrl">OBS Browser Source</label>
+          <div class="copy-row">
+            <input id="overlayUrl" readonly />
+            <button id="copyOverlay" type="button">복사</button>
+          </div>
+        </div>
+      </header>
+
+      <section class="main-grid">
+        <aside class="panel source-panel">
+          <h2>소스</h2>
+          <label class="file-picker">
+            <span>오디오/영상 / AR / 원곡</span>
+            <input id="audioFile" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mov" />
+          </label>
+          <label class="file-picker">
+            <span>가사 TXT</span>
+            <input id="lyricsFile" type="file" accept=".txt,text/plain" />
+          </label>
+          <textarea id="lyricsText" spellcheck="false" placeholder="가사 파일을 넣으면 줄 단위로 표시됩니다."></textarea>
+          <button id="generateSync" class="primary-action" type="button">자동 싱크 생성</button>
+          <div id="modelStatus" class="model-status">Turbo 모델 확인 중...</div>
+          <div id="analysisStatus" class="status-line">오디오와 가사를 선택하세요.</div>
+          <div id="analysisConflict" class="analysis-conflict" role="alert" hidden>
+            <strong id="analysisConflictTitle">AR/가사 불일치</strong>
+            <span id="analysisConflictMessage"></span>
+          </div>
+        </aside>
+
+        <section class="panel player-panel">
+          <div class="player-header">
+            <div>
+              <h2>재생</h2>
+              <p id="projectTitle" class="muted">프로젝트 없음</p>
+            </div>
+            <div class="time-readout">
+              <span id="currentTime">00:00.000</span>
+              <span id="duration">00:00.000</span>
+            </div>
+          </div>
+
+          <audio id="audioPlayer" controls preload="metadata"></audio>
+          <canvas id="waveform" width="960" height="160" aria-label="오디오 파형"></canvas>
+
+          <div class="subtitle-preview">
+            <div id="previewCurrent" class="preview-current">가사가 여기에 표시됩니다.</div>
+            <div id="previewNext" class="preview-next"></div>
+          </div>
+
+          <div class="transport-row">
+            <button id="restartPlayback" type="button">처음</button>
+            <button id="syncPlayback" type="button">현재 위치 전송</button>
+            <button id="exportProject" type="button">JSON 내보내기</button>
+            <label class="import-button">
+              JSON 가져오기
+              <input id="importProject" type="file" accept="application/json,.json" />
+            </label>
+          </div>
+        </section>
+
+        <aside class="panel overlay-panel">
+          <h2>Overlay</h2>
+          <label class="range-field">
+            <span>글자 크기</span>
+            <input id="fontSize" type="range" min="28" max="96" value="56" />
+            <output id="fontSizeValue">56</output>
+          </label>
+          <label class="toggle-field">
+            <input id="showNext" type="checkbox" checked />
+            <span>다음 줄 표시</span>
+          </label>
+          <label class="toggle-field">
+            <input id="shadow" type="checkbox" checked />
+            <span>그림자</span>
+          </label>
+          <label class="color-field">
+            <span>하이라이트</span>
+            <input id="accent" type="color" value="#f6d365" />
+          </label>
+          <label class="color-field">
+            <span>글자색</span>
+            <input id="textColor" type="color" value="#ffffff" />
+          </label>
+          <div class="segmented" role="group" aria-label="정렬">
+            <button class="selected" data-align="center" type="button">중앙</button>
+            <button data-align="left" type="button">왼쪽</button>
+            <button data-align="right" type="button">오른쪽</button>
+          </div>
+        </aside>
+      </section>
+
+      <section class="panel editor-panel">
+        <div class="editor-head">
+          <div>
+            <h2>줄 타이밍 보정</h2>
+            <p class="muted">몇 줄만 현재 시간에 고정하면 주변 줄이 같이 재배치됩니다.</p>
+          </div>
+          <div class="editor-actions">
+            <button id="setSelectedToNow" type="button">선택 줄 현재로 고정</button>
+            <div class="compact-adjust">
+              <span>선택 줄부터</span>
+              <button data-shift-after="-0.5" type="button">-0.5</button>
+              <button data-shift-after="-0.1" type="button">-0.1</button>
+              <button data-shift-after="0.1" type="button">+0.1</button>
+              <button data-shift-after="0.5" type="button">+0.5</button>
+            </div>
+            <div class="compact-adjust">
+              <span>전체</span>
+              <button data-shift-all="-0.5" type="button">-0.5</button>
+              <button data-shift-all="-0.1" type="button">-0.1</button>
+              <button data-shift-all="0.1" type="button">+0.1</button>
+              <button data-shift-all="0.5" type="button">+0.5</button>
+            </div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>줄</th>
+                <th>시작</th>
+                <th>보정</th>
+                <th>가사</th>
+                <th>앵커</th>
+                <th>이동</th>
+              </tr>
+            </thead>
+            <tbody id="timelineBody">
+              <tr>
+                <td colspan="6" class="empty-row">자동 싱크를 생성하면 편집표가 표시됩니다.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div
+      id="analysisLoading"
+      class="analysis-loading"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="analysisLoadingTitle"
+      aria-describedby="analysisLoadingMessage"
+      hidden
+    >
+      <div class="analysis-loading-panel">
+        <div class="analysis-spinner" aria-hidden="true"></div>
+        <div class="analysis-loading-copy">
+          <h2 id="analysisLoadingTitle">자동 싱크 분석 중</h2>
+          <p id="analysisLoadingMessage">오디오를 준비하고 있습니다...</p>
+          <p id="analysisElapsed" class="analysis-elapsed">경과 00:00</p>
+        </div>
+        <div class="analysis-progress" aria-hidden="true"><span></span></div>
+        <div class="analysis-loading-actions">
+          <button id="cancelAnalysis" class="cancel-analysis" type="button">분석 종료</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js?v=20260823-mismatch-cancel-1"></script>
+  </body>
+</html>
