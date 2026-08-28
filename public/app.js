@@ -1227,6 +1227,13 @@ async function generateSync() {
     }
 
     if (modelResult.ok) {
+      const resultLines = Array.isArray(modelResult.lyrics) && modelResult.lyrics.length
+        ? modelResult.lyrics.map((line) => String(line))
+        : lines;
+      app.lines = resultLines;
+      if (modelResult.autoSegmentation?.applied) {
+        elements.lyricsText.value = resultLines.join("\n");
+      }
       app.projectDuration = chooseDuration(getProjectDuration(), modelResult.duration);
       app.timeline = normalizeTimeline(modelResult.timeline || [], app.projectDuration);
       app.baseTimeline = cloneTimeline(app.timeline).map((row) => ({ ...row, anchor: false }));
@@ -1245,7 +1252,11 @@ async function generateSync() {
           true
         );
       }
-      setStatus(`Turbo ${deviceLabel} 싱크 완료: ${modelResult.matchedLines || 0}/${lines.length}줄 매칭`);
+      const segmentation = modelResult.autoSegmentation;
+      const segmentationLabel = segmentation?.applied
+        ? ` · 자동 줄 나눔 ${segmentation.originalLines}→${segmentation.resultLines}줄`
+        : "";
+      setStatus(`Turbo ${deviceLabel} 싱크 완료: ${modelResult.matchedLines || 0}/${resultLines.length}줄 매칭${segmentationLabel}`);
       checkModelStatus();
       return;
     }

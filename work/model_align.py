@@ -191,6 +191,7 @@ def japanese_morphemes(text):
         result.append({
             "surface": surface,
             "reading": reading,
+            "partOfSpeech": tuple(str(part) for part in morpheme.part_of_speech()),
             "start": int(morpheme.begin()),
             "end": int(morpheme.end())
         })
@@ -397,6 +398,7 @@ def flatten_lyric_words(lines):
                     "text": morpheme["surface"],
                     "norm": normalized_word(morpheme["surface"]),
                     "reading": morpheme["reading"],
+                    "partOfSpeech": morpheme.get("partOfSpeech", ()),
                     "timingWeight": max(1.0, mora_count(morpheme["reading"])),
                     "line": line_index,
                     "linePosition": line_position,
@@ -551,6 +553,235 @@ def build_word_anchors(lines, chunks):
             }
 
     return lyric_words, line_word_ranges, transcript_words, anchors
+
+
+AUTO_SEGMENT_TRIGGER_WIDTH = 58.0
+AUTO_SEGMENT_TARGET_WIDTH = 38.0
+AUTO_SEGMENT_MAX_WIDTH = 52.0
+AUTO_SEGMENT_MIN_WIDTH = 18.0
+
+
+def display_width_units(text):
+    width = 0.0
+    for char in str(text):
+        if unicodedata.combining(char):
+            continue
+        if char.isspace():
+            width += 0.45
+        elif unicodedata.east_asian_width(char) in ("W", "F"):
+            width += 2.0
+        else:
+            width += 1.0
+    return width
+
+
+def lyrics_need_auto_segmentation(lines):
+    return any(display_width_units(line) > AUTO_SEGMENT_TRIGGER_WIDTH for line in lines)
+
+
+def lyric_boundary_signal(line, words, anchors, boundary):
+    if boundary <= 0 or boundary >= len(words):
+        return 0.0, False
+
+    previous_word = words[boundary - 1]
+    next_word = words[boundary]
+    cut = int(next_word.get("displayStart", 0) or 0)
+    prefix = line[:cut].rstrip()
+    reward = 0.0
+    audio_guided = False
+
+    if re.search(r"[.!?。！？…]+['\"’”」』）)]*$", prefix):
+        reward += 1.05
+    elif re.search(r"[,:;，、：；]+['\"’”」』）)]*$", prefix):
+        reward += 0.45
+
+    gap = line[int(previous_word.get("displayEnd", cut) or cut):cut]
+    if gap and not gap.strip():
+        reward += 0.08
+
+    if contains_japanese(line):
+        previous_text = normalized_word(previous_word.get("text", ""))
+        next_text = normalized_word(next_word.get("text", ""))
+        next_part = tuple(next_word.get("partOfSpeech", ()))
+        continuation_pair = (previous_text, next_text) in {
+            ("と", "し"), ("に", "な"), ("で", "あ"), ("て", "い"),
+            ("て", "く"), ("て", "しま"), ("たり", "し"),
+        }
+        grammatical_continuation = any(
+            category in {"助詞", "助動詞", "接尾辞"}
+            for category in next_part[:1]
+        ) or continuation_pair or next_text in {
+            "は", "が", "を", "に", "へ", "と", "で", "の", "も", "や", "か", "ね", "よ",
+            "から", "まで", "より", "って", "ので", "のに", "たり", "て", "ない", "ながら",
+            "けど", "けれど", "なら", "れば", "して", "しても"
+        }
+        if grammatical_continuation:
+            reward -= 3.0
+
+    previous_anchor = anchors[boundary - 1] if boundary - 1 < len(anchors) else None
+    next_anchor = anchors[boundary] if boundary < len(anchors) else None
+    if previous_anchor and next_anchor:
+        previous_index = int(previous_anchor.get("transcriptIndex", -1))
+        next_index = int(next_anchor.get("transcriptIndex", -1))
+        if next_index > previous_index:
+            pause = max(
+                0.0,
+                float(next_anchor.get("start", 0.0) or 0.0)
+                - float(previous_anchor.get("end", 0.0) or 0.0)
+            )
+            if pause >= 0.55:
+                reward += 1.35
+                audio_guided = True
+            elif pause >= 0.32:
+                reward += 0.9
+                audio_guided = True
+            elif pause >= 0.18:
+                reward += 0.38
+                audio_guided = True
+
+            if previous_anchor.get("chunk") != next_anchor.get("chunk"):
+                reward += 0.28
+                audio_guided = True
+
+    return min(2.4, reward), audio_guided
+
+
+def split_long_lyric_line(line, words, anchors):
+    if display_width_units(line) <= AUTO_SEGMENT_TRIGGER_WIDTH or len(words) < 2:
+        return [line], 0
+
+    cuts = [0]
+    for word in words[1:]:
+        cut = max(cuts[-1], min(len(line), int(word.get("displayStart", cuts[-1]) or cuts[-1])))
+        cuts.append(cut)
+    cuts.append(len(line))
+
+    if len(set(cuts)) < 3:
+        return [line], 0
+
+    signals = [(0.0, False)] * (len(words) + 1)
+    for boundary in range(1, len(words)):
+        signals[boundary] = lyric_boundary_signal(line, words, anchors, boundary)
+
+    count = len(words)
+    costs = [math.inf] * (count + 1)
+    previous = [None] * (count + 1)
+    costs[0] = 0.0
+
+    for end in range(1, count + 1):
+        for start in range(end - 1, -1, -1):
+            segment = line[cuts[start]:cuts[end]].strip()
+            width = display_width_units(segment)
+            if width <= 0:
+                continue
+            if (
+                width < AUTO_SEGMENT_MIN_WIDTH
+                and end < count
+                and not re.search(r"[.!?。！？…]+['\"’”」』）)]*$", segment)
+            ):
+                continue
+            if width > AUTO_SEGMENT_MAX_WIDTH * 1.7 and end - start > 1:
+                break
+            if not math.isfinite(costs[start]):
+                continue
+
+            if width > AUTO_SEGMENT_MAX_WIDTH:
+                length_penalty = 1.8 + ((width - AUTO_SEGMENT_MAX_WIDTH) / 8.0) ** 2
+            elif width < AUTO_SEGMENT_MIN_WIDTH and end < count:
+                length_penalty = 0.9 * (AUTO_SEGMENT_MIN_WIDTH - width) / AUTO_SEGMENT_MIN_WIDTH
+            else:
+                length_penalty = 0.38 * abs(width - AUTO_SEGMENT_TARGET_WIDTH) / AUTO_SEGMENT_TARGET_WIDTH
+
+            boundary_reward = signals[end][0] if end < count else 0.0
+            candidate_cost = costs[start] + 0.24 + length_penalty - boundary_reward
+            if candidate_cost < costs[end]:
+                costs[end] = candidate_cost
+                previous[end] = start
+
+    if previous[count] is None:
+        return [line], 0
+
+    ranges = []
+    cursor = count
+    while cursor > 0:
+        start = previous[cursor]
+        if start is None:
+            return [line], 0
+        ranges.append((start, cursor))
+        cursor = start
+    ranges.reverse()
+
+    # Avoid leaving a tiny fragment at either edge when it fits naturally in
+    # its neighbor. Slice with the original offsets so Japanese text does not
+    # gain spaces and Latin text keeps its existing whitespace.
+    if len(ranges) > 1:
+        first_width = display_width_units(
+            line[cuts[ranges[0][0]]:cuts[ranges[0][1]]].strip()
+        )
+        merged_first = (ranges[0][0], ranges[1][1])
+        merged_first_width = display_width_units(
+            line[cuts[merged_first[0]]:cuts[merged_first[1]]].strip()
+        )
+        if (
+            first_width < AUTO_SEGMENT_MIN_WIDTH
+            and merged_first_width <= AUTO_SEGMENT_MAX_WIDTH * 1.15
+        ):
+            ranges[0:2] = [merged_first]
+
+    if len(ranges) > 1:
+        last_width = display_width_units(
+            line[cuts[ranges[-1][0]]:cuts[ranges[-1][1]]].strip()
+        )
+        merged_last = (ranges[-2][0], ranges[-1][1])
+        merged_last_width = display_width_units(
+            line[cuts[merged_last[0]]:cuts[merged_last[1]]].strip()
+        )
+        if (
+            last_width < AUTO_SEGMENT_MIN_WIDTH
+            and merged_last_width <= AUTO_SEGMENT_MAX_WIDTH * 1.15
+        ):
+            ranges[-2:] = [merged_last]
+
+    segments = [line[cuts[start]:cuts[end]].strip() for start, end in ranges]
+    segments = [segment for segment in segments if segment]
+    if len(segments) <= 1:
+        return [line], 0
+
+    audio_boundaries = sum(1 for _, end in ranges[:-1] if signals[end][1])
+    return segments, audio_boundaries
+
+
+def auto_segment_lyrics(lines, chunks):
+    metadata = {
+        "applied": False,
+        "originalLines": len(lines),
+        "resultLines": len(lines),
+        "longLines": 0,
+        "audioGuidedBoundaries": 0
+    }
+    if not lyrics_need_auto_segmentation(lines):
+        return list(lines), metadata
+
+    lyric_words, line_word_ranges, _, anchors = build_word_anchors(lines, chunks)
+    segmented = []
+    for line_index, line in enumerate(lines):
+        if display_width_units(line) <= AUTO_SEGMENT_TRIGGER_WIDTH:
+            segmented.append(line)
+            continue
+
+        metadata["longLines"] += 1
+        word_start, word_end = line_word_ranges[line_index]
+        parts, audio_boundaries = split_long_lyric_line(
+            line,
+            lyric_words[word_start:word_end],
+            anchors[word_start:word_end]
+        )
+        segmented.extend(parts)
+        metadata["audioGuidedBoundaries"] += audio_boundaries
+
+    metadata["applied"] = len(segmented) > len(lines)
+    metadata["resultLines"] = len(segmented)
+    return segmented, metadata
 
 
 def split_display_units(text):
@@ -1982,7 +2213,8 @@ def rescue_alignment_windows(
 
 
 def run_alignment(audio_path, lyrics_path, model_name):
-    lines = read_lyrics(lyrics_path)
+    input_lines = read_lyrics(lyrics_path)
+    lines = list(input_lines)
     if not lines:
         respond({"ok": False, "error": "Lyrics file is empty."})
         return
@@ -2031,6 +2263,14 @@ def run_alignment(audio_path, lyrics_path, model_name):
     inference_device = "cpu"
     faster_model = None
     compatibility = None
+    auto_segmentation = {
+        "applied": False,
+        "originalLines": len(input_lines),
+        "resultLines": len(input_lines),
+        "longLines": 0,
+        "audioGuidedBoundaries": 0
+    }
+    auto_segmentation_pending = lyrics_need_auto_segmentation(lines)
 
     if faster_available:
         faster_model, inference_device = load_faster_whisper_model(model_name)
@@ -2054,6 +2294,10 @@ def run_alignment(audio_path, lyrics_path, model_name):
                 candidate_language
             )
             word_count = 0
+
+        if auto_segmentation_pending:
+            lines, auto_segmentation = auto_segment_lyrics(lines, chunks)
+            auto_segmentation_pending = False
 
         candidate = build_alignment_candidate(label, lines, chunks, duration)
         candidates.append(candidate)
@@ -2165,6 +2409,7 @@ def run_alignment(audio_path, lyrics_path, model_name):
         "rescuedLines": rescued_lines,
         "forcedLines": forced_lines,
         "repeatedLines": repeated_lines,
+        "autoSegmentation": auto_segmentation,
         "compatibility": compatibility or {
             "status": "unknown",
             "score": 0.0,
