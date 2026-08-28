@@ -1881,7 +1881,7 @@ def forced_alignment_window(audio, sampling_rate, lines, window_start, window_en
         first_start = float(first.get("start", 0.0) or 0.0)
         first_end = float(first.get("end", first_start) or first_start)
         if first_end - first_start > 3.0:
-            first_start = first_end
+            first_start = max(first_start, first_end - 1.4)
         start = window_start + first_start
         end = max(start + 0.1, window_start + float(last.get("end", first_end) or first_end))
         probabilities = [float(word.get("probability", 0.0) or 0.0) for word in words]
@@ -1894,6 +1894,8 @@ def forced_alignment_window(audio, sampling_rate, lines, window_start, window_en
             }
             for word in words
         ]
+        if word_rows:
+            word_rows[0]["start"] = start
         rows.append({
             "text": line,
             "start": start,
@@ -1987,7 +1989,8 @@ def force_align_low_confidence_windows(
                 "start": start,
                 "end": float(forced_row["end"]),
                 "text": forced_row["text"],
-                "words": forced_row["words"]
+                "words": forced_row["words"],
+                "source": "forced-text"
             })
             forced_count += 1
 
@@ -2003,6 +2006,274 @@ def force_align_low_confidence_windows(
     forced["quality"] = timeline_quality_score(lines, timeline, matched_lines)
     forced["alignmentMethod"] = f"{best['alignmentMethod']}+forced-text"
     return forced, forced_count, forced_chunks
+
+
+def find_consecutive_repeated_runs(lines, minimum_repeats=3):
+    keys = [comparison_text(line) for line in lines]
+    runs = []
+    index = 0
+    while index < len(lines):
+        key = keys[index]
+        if len(key) < 6:
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(lines) and keys[end] == key:
+            end += 1
+
+        repeat_count = end - index
+        if repeat_count < minimum_repeats:
+            index += 1
+            continue
+
+        decorated_end = end
+        if end < len(lines):
+            candidate = keys[end]
+            maximum_length = max(len(key) + 12, round(len(key) * 2.2))
+            if candidate.startswith(key) and key != candidate and len(candidate) <= maximum_length:
+                decorated_end += 1
+
+        runs.append({
+            "start": index,
+            "end": decorated_end - 1,
+            "base": key,
+            "exactRepeats": repeat_count
+        })
+        index = decorated_end
+
+    return runs
+
+
+def repeated_line_step(timeline, runs):
+    gaps = []
+    for run in runs:
+        for index in range(run["start"], run["end"]):
+            left = float(timeline[index].get("start", math.nan))
+            right = float(timeline[index + 1].get("start", math.nan))
+            gap = right - left
+            if math.isfinite(gap) and 0.65 <= gap <= 5.2:
+                gaps.append(gap)
+
+    if not gaps:
+        return 2.35
+    gaps.sort()
+    return max(0.9, min(4.8, gaps[len(gaps) // 2]))
+
+
+def repeated_phrase_candidate_starts(base_line, chunks):
+    lyric_words, _ = flatten_lyric_words([base_line])
+    lyric_words = [word for word in lyric_words if word.get("norm")]
+    transcript_words = flatten_transcript_words([
+        chunk for chunk in chunks if chunk.get("source") != "forced-text"
+    ])
+    count = len(lyric_words)
+    if count < 2 or len(transcript_words) < count:
+        return []
+
+    candidates = []
+    for start in range(0, len(transcript_words) - count + 1):
+        similarities = [
+            word_similarity(lyric_words[offset]["text"], transcript_words[start + offset]["text"])
+            for offset in range(count)
+        ]
+        strong_words = sum(1 for score in similarities if score >= 0.55)
+        average = sum(similarities) / count
+        if strong_words < min(2, count) or average < 0.5:
+            continue
+        candidates.append(float(transcript_words[start]["start"]))
+    return candidates
+
+
+def regularize_repeated_rows(rows, candidate_starts, typical_step):
+    if len(rows) < 2:
+        return rows
+
+    first_guess = float(rows[0]["start"])
+    last_candidate = first_guess + typical_step * (len(rows) - 1) + typical_step * 0.9
+    phases = []
+    for candidate_start in candidate_starts:
+        if candidate_start < first_guess - typical_step or candidate_start > last_candidate:
+            continue
+        offset = round((candidate_start - first_guess) / typical_step)
+        if offset < 0 or offset >= len(rows):
+            continue
+        phase = candidate_start - offset * typical_step
+        if abs(phase - first_guess) <= typical_step * 0.8:
+            phases.append(phase)
+
+    regular_start = min(phases, key=lambda phase: abs(phase - first_guess)) if phases else first_guess
+    adjusted = []
+    for offset, row in enumerate(rows):
+        expected = regular_start + typical_step * offset
+        measured = float(row["start"])
+        if offset == 0:
+            start = regular_start
+        elif abs(measured - expected) <= typical_step * 0.22:
+            start = measured * 0.55 + expected * 0.45
+        else:
+            start = expected
+        adjusted.append({**row, "start": start})
+
+    for index, row in enumerate(adjusted[:-1]):
+        row["end"] = min(float(row["end"]), float(adjusted[index + 1]["start"]) - 0.05)
+        row["end"] = max(float(row["start"]) + 0.1, float(row["end"]))
+    return adjusted
+
+
+def force_align_repeated_runs(
+    audio_path,
+    lines,
+    best,
+    faster_model,
+    max_runs=8
+):
+    from faster_whisper.audio import decode_audio
+
+    timeline = [dict(row) for row in best.get("timeline", [])]
+    runs = find_consecutive_repeated_runs(lines)
+    if not timeline or not runs or faster_model is None:
+        return best, 0, []
+
+    sampling_rate = faster_model.feature_extractor.sampling_rate
+    audio = decode_audio(audio_path, sampling_rate=sampling_rate)
+    duration = float(best.get("duration", 0.0) or 0.0)
+    typical_step = repeated_line_step(timeline, runs)
+    repeated_indexes = {
+        index
+        for run in runs
+        for index in range(run["start"], run["end"] + 1)
+    }
+    forced_count = 0
+    forced_chunks = []
+    phrase_candidates = {}
+
+    for run in runs[:max_runs]:
+        run_start = int(run["start"])
+        run_end = int(run["end"])
+        run_count = run_end - run_start + 1
+
+        previous_index = run_start - 1 if run_start > 0 and run_start - 1 not in repeated_indexes else None
+        following_index = (
+            run_end + 1
+            if run_end + 1 < len(lines) and run_end + 1 not in repeated_indexes
+            else None
+        )
+        previous = timeline[previous_index] if previous_index is not None else None
+        following = timeline[following_index] if following_index is not None else None
+        previous_ready = previous is not None and math.isfinite(float(previous.get("start", math.nan)))
+        following_ready = following is not None and math.isfinite(float(following.get("start", math.nan)))
+
+        expected_span = typical_step * run_count
+        if previous_ready:
+            window_start = max(0.0, float(previous["start"]) - 0.8)
+        elif following_ready:
+            window_start = max(0.0, float(following["start"]) - expected_span - 5.5)
+        else:
+            window_start = max(0.0, float(timeline[run_start].get("start", 0.0) or 0.0) - 1.2)
+
+        if following_ready:
+            window_end = min(duration, float(following.get("end", following["start"])) + 0.8)
+        elif previous_ready:
+            window_end = min(duration, window_start + expected_span + 5.5)
+        else:
+            window_end = min(
+                duration,
+                max(window_start + expected_span + 3.0, float(timeline[run_end].get("end", 0.0) or 0.0) + 1.2)
+            )
+
+        if window_end - window_start > 29.5:
+            if previous_ready and not following_ready:
+                window_end = window_start + 29.5
+            elif following_ready and not previous_ready:
+                window_start = max(0.0, window_end - 29.5)
+            else:
+                current_start = float(timeline[run_start].get("start", 0.0) or 0.0)
+                anchor_midpoint = (float(previous["start"]) + float(following["start"])) / 2.0
+                if current_start <= anchor_midpoint:
+                    following_ready = False
+                    following_index = None
+                    window_end = min(duration, window_start + min(29.5, expected_span + 5.5))
+                else:
+                    previous_ready = False
+                    previous_index = None
+                    window_start = max(0.0, window_end - min(29.5, expected_span + 5.5))
+        if window_end - window_start < max(4.0, typical_step * run_count * 0.6):
+            continue
+
+        context_start = previous_index if previous_ready else run_start
+        context_end = following_index if following_ready else run_end
+        context_lines = lines[context_start:context_end + 1]
+        forced_rows = forced_alignment_window(
+            audio,
+            sampling_rate,
+            context_lines,
+            window_start,
+            window_end,
+            faster_model,
+            detect_language_hint(context_lines)
+        )
+        run_offset = run_start - context_start
+        selected = forced_rows[run_offset:run_offset + run_count]
+        if len(selected) != run_count or any(row is None for row in selected):
+            continue
+
+        starts = [float(row["start"]) for row in selected]
+        gaps = [right - left for left, right in zip(starts, starts[1:])]
+        if any(gap < 0.35 or gap > max(6.0, typical_step * 2.7) for gap in gaps):
+            continue
+
+        base_key = run["base"]
+        if base_key not in phrase_candidates:
+            phrase_candidates[base_key] = repeated_phrase_candidate_starts(
+                lines[run_start],
+                best.get("chunks", [])
+            )
+        selected = regularize_repeated_rows(
+            selected,
+            phrase_candidates[base_key],
+            typical_step
+        )
+
+        for offset, forced_row in enumerate(selected):
+            target_index = run_start + offset
+            timeline[target_index] = {
+                **timeline[target_index],
+                "start": float(forced_row["start"]),
+                "end": float(forced_row["end"]),
+                "confidence": float(forced_row["confidence"]),
+                "source": "forced-repeat"
+            }
+            forced_chunks.append({
+                "start": float(forced_row["start"]),
+                "end": float(forced_row["end"]),
+                "text": forced_row["text"],
+                "words": forced_row["words"],
+                "source": "forced-text"
+            })
+            forced_count += 1
+
+    if not forced_count:
+        return best, 0, []
+
+    for index, row in enumerate(timeline):
+        next_row = timeline[index + 1] if index + 1 < len(timeline) else None
+        if next_row:
+            row["end"] = min(
+                max(float(row["start"]) + 0.1, float(row.get("end", row["start"] + 0.1) or row["start"] + 0.1)),
+                max(float(row["start"]) + 0.1, float(next_row["start"]) - 0.05)
+            )
+        row["start"] = round(float(row["start"]), 3)
+        row["end"] = round(float(row["end"]), 3)
+
+    aligned = dict(best)
+    aligned["timeline"] = timeline
+    aligned["matchedLines"] = sum(
+        1 for row in timeline if float(row.get("confidence", 0.0) or 0.0) >= 0.35
+    )
+    aligned["quality"] = timeline_quality_score(lines, timeline, aligned["matchedLines"])
+    aligned["alignmentMethod"] = f"{best['alignmentMethod']}+forced-repeat"
+    return aligned, forced_count, forced_chunks
 
 
 def refine_repeated_patterns(timeline):
@@ -2377,14 +2648,31 @@ def run_alignment(audio_path, lyrics_path, model_name):
             )
             word_count += sum(len(chunk.get("words") or []) for chunk in forced_chunks)
 
-    repeated_lines = refine_repeated_patterns(best.get("timeline", []))
+    forced_repeated_lines = 0
+    if faster_available:
+        best, forced_repeated_lines, repeated_chunks = force_align_repeated_runs(
+            audio_path,
+            lines,
+            best,
+            faster_model
+        )
+        if repeated_chunks:
+            best["chunks"] = sorted(
+                list(best.get("chunks", [])) + repeated_chunks,
+                key=lambda chunk: (float(chunk.get("start", 0.0) or 0.0), float(chunk.get("end", 0.0) or 0.0))
+            )
+            word_count += sum(len(chunk.get("words") or []) for chunk in repeated_chunks)
+
+    pattern_repeated_lines = refine_repeated_patterns(best.get("timeline", []))
+    repeated_lines = forced_repeated_lines + pattern_repeated_lines
+    if pattern_repeated_lines:
+        best["alignmentMethod"] = f"{best['alignmentMethod']}+repeated-pattern"
     if repeated_lines:
         best["matchedLines"] = sum(
             1 for row in best["timeline"]
             if float(row.get("confidence", 0.0) or 0.0) >= 0.35
         )
         best["quality"] = timeline_quality_score(lines, best["timeline"], best["matchedLines"])
-        best["alignmentMethod"] = f"{best['alignmentMethod']}+repeated-pattern"
 
     best["timeline"] = attach_token_timelines(lines, best.get("timeline", []), best.get("chunks", []))
 
