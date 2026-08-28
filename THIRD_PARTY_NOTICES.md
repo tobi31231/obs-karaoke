@@ -6,6 +6,7 @@ Full license texts and upstream notices are included in the installed `licenses`
 Major bundled components:
 
 - Microsoft .NET Runtime 8
+- Microsoft Edge WebView2 SDK and Runtime
 - Node.js
 - Python
 - faster-whisper

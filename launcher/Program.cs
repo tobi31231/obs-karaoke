@@ -1,7 +1,8 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
-using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
 
 namespace ObsKaraokeLauncher;
 
@@ -19,17 +20,20 @@ public sealed class LauncherForm : Form
 {
     private const string AppUrl = "http://127.0.0.1:5177/";
     private const string OverlayUrl = "http://127.0.0.1:5177/overlay?v=20260823-mismatch-cancel-1";
+
     private readonly Label _status = new();
-    private readonly Button _openApp = new();
-    private readonly Button _copyOverlay = new();
-    private readonly Button _installModel = new();
-    private readonly Button _stop = new();
+    private readonly Label _loadingMessage = new();
+    private readonly ProgressBar _loadingProgress = new();
+    private readonly Button _retry = new();
+    private readonly Button _reload = new();
+    private readonly WebView2 _webView = new();
+    private readonly Panel _loadingPanel = new();
     private readonly System.Windows.Forms.Timer _pollTimer = new();
-    private readonly NotifyIcon _trayIcon = new();
-    private readonly ContextMenuStrip _trayMenu = new();
+
     private Process? _serverProcess;
     private bool _serverWasReady;
-    private bool _controlPageOpened;
+    private bool _webViewInitializing;
+    private bool _webViewReady;
     private volatile bool _closing;
     private int _serverFailureCount;
 
@@ -37,9 +41,11 @@ public sealed class LauncherForm : Form
     {
         Text = "OBS Karaoke MVP";
         AutoScaleMode = AutoScaleMode.Dpi;
-        AutoScroll = true;
-        ClientSize = new Size(760, 430);
-        MinimumSize = new Size(620, 380);
+        var workingArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1366, 768);
+        ClientSize = new Size(
+            Math.Min(1280, Math.Max(900, workingArea.Width - 80)),
+            Math.Min(820, Math.Max(640, workingArea.Height - 80)));
+        MinimumSize = new Size(900, 640);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
@@ -49,114 +55,126 @@ public sealed class LauncherForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
-            Padding = new Padding(28)
+            RowCount = 3,
+            Margin = new Padding(0),
+            Padding = new Padding(0)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+
+        var toolbar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(247, 248, 250),
+            ColumnCount = 4,
+            RowCount = 1,
+            Padding = new Padding(18, 10, 14, 10),
+            Margin = new Padding(0)
+        };
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         var title = new Label
         {
             Text = "OBS Karaoke MVP",
-            Font = new Font(Font.FontFamily, 16, FontStyle.Bold),
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 12)
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 13, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0)
         };
 
-        _status.Text = "로컬 서버를 시작하는 중입니다...";
-        _status.AutoSize = false;
-        _status.Dock = DockStyle.Fill;
-        _status.TextAlign = ContentAlignment.MiddleLeft;
-        _status.MinimumSize = new Size(0, 110);
-        _status.Margin = new Padding(0, 0, 0, 18);
-
-        _openApp.Text = "조작 화면으로 가기";
-        _openApp.Dock = DockStyle.Fill;
-        _openApp.MinimumSize = new Size(0, 42);
-        _openApp.Enabled = false;
-        _openApp.Click += (_, _) => OpenControlPage();
-
-        _copyOverlay.Text = "Overlay 주소 복사";
-        _copyOverlay.Dock = DockStyle.Fill;
-        _copyOverlay.MinimumSize = new Size(0, 42);
-        _copyOverlay.Click += (_, _) =>
+        var copyOverlay = CreateToolbarButton("Overlay 주소 복사");
+        copyOverlay.Click += (_, _) =>
         {
             Clipboard.SetText(OverlayUrl);
             _status.Text = "OBS Browser Source 주소를 복사했습니다.";
         };
 
-        _installModel.Text = "Turbo 모델 설치";
-        _installModel.Dock = DockStyle.Fill;
-        _installModel.MinimumSize = new Size(0, 42);
-        _installModel.Click += (_, _) => RunBatch("install-turbo-model.bat");
+        _reload.Text = "새로고침";
+        ConfigureToolbarButton(_reload);
+        _reload.Enabled = false;
+        _reload.Click += async (_, _) => await ReloadControlPageAsync();
 
-        var buttonRow = new TableLayoutPanel
+        var stop = CreateToolbarButton("종료");
+        stop.Click += (_, _) => Close();
+
+        toolbar.Controls.Add(title, 0, 0);
+        toolbar.Controls.Add(copyOverlay, 1, 0);
+        toolbar.Controls.Add(_reload, 2, 0);
+        toolbar.Controls.Add(stop, 3, 0);
+
+        var content = new Panel
         {
             Dock = DockStyle.Fill,
-            AutoSize = true,
-            ColumnCount = 3,
-            Margin = new Padding(0, 0, 0, 18)
-        };
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
-        buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334f));
-        buttonRow.Controls.Add(_openApp, 0, 0);
-        buttonRow.Controls.Add(_copyOverlay, 1, 0);
-        buttonRow.Controls.Add(_installModel, 2, 0);
-
-        var overlayLabel = new Label
-        {
-            Text = "OBS Browser Source URL",
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 7)
-        };
-
-        var overlay = new TextBox
-        {
-            Text = OverlayUrl,
-            ReadOnly = true,
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0, 0, 0, 18)
-        };
-
-        _stop.Text = "종료";
-        _stop.Size = new Size(110, 38);
-        _stop.Click += (_, _) => Close();
-
-        var bottomRow = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
+            BackColor = Color.White,
             Margin = new Padding(0)
         };
-        bottomRow.Controls.Add(_stop);
+        _webView.Dock = DockStyle.Fill;
+        _webView.Visible = false;
+        content.Controls.Add(_webView);
 
-        layout.Controls.Add(title, 0, 0);
-        layout.Controls.Add(_status, 0, 1);
-        layout.Controls.Add(buttonRow, 0, 2);
-        layout.Controls.Add(overlayLabel, 0, 3);
-        layout.Controls.Add(overlay, 0, 4);
-        layout.Controls.Add(bottomRow, 0, 5);
+        _loadingPanel.Dock = DockStyle.Fill;
+        _loadingPanel.BackColor = Color.White;
+        var loadingLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 5,
+            Padding = new Padding(24)
+        };
+        loadingLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        loadingLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        loadingLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        loadingLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        loadingLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        loadingLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+
+        _loadingMessage.Text = "로컬 실행 환경을 준비하는 중입니다...";
+        _loadingMessage.AutoSize = true;
+        _loadingMessage.Anchor = AnchorStyles.None;
+        _loadingMessage.Font = new Font("Segoe UI", 12, FontStyle.Regular);
+        _loadingMessage.TextAlign = ContentAlignment.MiddleCenter;
+        _loadingMessage.Margin = new Padding(0, 0, 0, 12);
+
+        _loadingProgress.Style = ProgressBarStyle.Marquee;
+        _loadingProgress.MarqueeAnimationSpeed = 28;
+        _loadingProgress.Width = 320;
+        _loadingProgress.Height = 8;
+        _loadingProgress.Anchor = AnchorStyles.None;
+
+        _retry.Text = "다시 시도";
+        _retry.AutoSize = true;
+        _retry.MinimumSize = new Size(110, 36);
+        _retry.Anchor = AnchorStyles.None;
+        _retry.Visible = false;
+        _retry.Click += async (_, _) => await RetryAsync();
+
+        loadingLayout.Controls.Add(new Panel(), 0, 0);
+        loadingLayout.Controls.Add(_loadingMessage, 0, 1);
+        loadingLayout.Controls.Add(_loadingProgress, 0, 2);
+        loadingLayout.Controls.Add(_retry, 0, 3);
+        loadingLayout.Controls.Add(new Panel(), 0, 4);
+        _loadingPanel.Controls.Add(loadingLayout);
+        content.Controls.Add(_loadingPanel);
+        _loadingPanel.BringToFront();
+
+        _status.Text = $"시작 중 · OBS Overlay: {OverlayUrl}";
+        _status.Dock = DockStyle.Fill;
+        _status.BackColor = Color.FromArgb(247, 248, 250);
+        _status.ForeColor = Color.FromArgb(70, 75, 84);
+        _status.TextAlign = ContentAlignment.MiddleLeft;
+        _status.Padding = new Padding(18, 0, 10, 0);
+        _status.Margin = new Padding(0);
+        _status.AutoEllipsis = true;
+
+        layout.Controls.Add(toolbar, 0, 0);
+        layout.Controls.Add(content, 0, 1);
+        layout.Controls.Add(_status, 0, 2);
         Controls.Add(layout);
-
-        var trayOpen = new ToolStripMenuItem("조작 화면 열기");
-        trayOpen.Click += (_, _) => OpenControlPage();
-        var trayShow = new ToolStripMenuItem("런처 표시");
-        trayShow.Click += (_, _) => ShowLauncher();
-        var trayExit = new ToolStripMenuItem("완전 종료");
-        trayExit.Click += (_, _) => Close();
-        _trayMenu.Items.AddRange([trayOpen, trayShow, new ToolStripSeparator(), trayExit]);
-        _trayIcon.Icon = SystemIcons.Application;
-        _trayIcon.Text = "OBS Karaoke MVP";
-        _trayIcon.ContextMenuStrip = _trayMenu;
-        _trayIcon.DoubleClick += (_, _) => OpenControlPage();
 
         _pollTimer.Interval = 700;
         _pollTimer.Tick += async (_, _) => await PollServerAsync();
@@ -169,100 +187,60 @@ public sealed class LauncherForm : Form
         FormClosing += (_, _) =>
         {
             _closing = true;
-            _trayIcon.Visible = false;
-            _trayIcon.Dispose();
-            _trayMenu.Dispose();
+            _pollTimer.Stop();
+            try
+            {
+                _webView.CoreWebView2?.Stop();
+                _webView.Dispose();
+            }
+            catch
+            {
+                // The WebView may already have closed after a renderer failure.
+            }
             StopServer();
         };
     }
 
     private static string AppDirectory => AppContext.BaseDirectory;
 
-    private bool OpenControlPage()
+    private static Button CreateToolbarButton(string text)
     {
-        if (!IsPortOpen())
-        {
-            _status.Text = "로컬 서버가 아직 준비되지 않았습니다.";
-            return false;
-        }
-
-        try
-        {
-            OpenUrl(AppUrl);
-            HideLauncher();
-            return true;
-        }
-        catch (Exception error)
-        {
-            _status.Text = $"브라우저를 열지 못했습니다: {error.Message}";
-            return false;
-        }
+        var button = new Button { Text = text };
+        ConfigureToolbarButton(button);
+        return button;
     }
 
-    private void HideLauncher()
+    private static void ConfigureToolbarButton(Button button)
     {
-        _trayIcon.Visible = true;
-        ShowInTaskbar = false;
-        Hide();
-    }
-
-    private void ShowLauncher()
-    {
-        ShowInTaskbar = true;
-        Show();
-        WindowState = FormWindowState.Normal;
-        Activate();
-        _trayIcon.Visible = false;
-    }
-
-    private static void OpenUrl(string url)
-    {
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = url,
-            UseShellExecute = true
-        });
-    }
-
-    private void RunBatch(string fileName)
-    {
-        var path = Path.Combine(AppDirectory, fileName);
-        if (!File.Exists(path))
-        {
-            MessageBox.Show($"{fileName} 파일을 찾을 수 없습니다.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = path,
-            WorkingDirectory = AppDirectory,
-            UseShellExecute = true
-        });
+        button.AutoSize = true;
+        button.MinimumSize = new Size(96, 34);
+        button.Margin = new Padding(8, 0, 0, 0);
+        button.Padding = new Padding(10, 0, 10, 0);
     }
 
     private void StartServer()
     {
         if (IsPortOpen())
         {
-            _status.Text = "이미 실행 중인 로컬 서버를 사용합니다.";
+            _status.Text = "이미 실행 중인 로컬 서버에 연결하는 중입니다...";
             return;
         }
 
         var serverPath = Path.Combine(AppDirectory, "server.js");
         if (!File.Exists(serverPath))
         {
-            _status.Text = "server.js 파일을 찾을 수 없습니다. 앱 폴더 구성을 확인하세요.";
+            ShowError("server.js 파일을 찾을 수 없습니다. 앱을 다시 설치해 주세요.");
             return;
         }
 
         var node = FindNode();
         if (node is null)
         {
-            _status.Text = "Node.js를 찾을 수 없습니다. Node.js 18 이상을 설치하거나 앱 폴더에 node.exe를 넣어주세요.";
+            ShowError("Node.js 실행 파일을 찾을 수 없습니다. 앱을 다시 설치해 주세요.");
             return;
         }
 
+        ShowLoading("로컬 서버를 시작하는 중입니다...");
         _serverProcess = Process.Start(new ProcessStartInfo
         {
             FileName = node,
@@ -279,6 +257,122 @@ public sealed class LauncherForm : Form
         }
     }
 
+    private async Task InitializeWebViewAsync()
+    {
+        if (_webViewReady || _webViewInitializing || _closing) return;
+        _webViewInitializing = true;
+        ShowLoading("앱 조작 화면을 여는 중입니다...");
+
+        try
+        {
+            if (_webView.CoreWebView2 is not null)
+            {
+                _webView.CoreWebView2.Navigate(AppUrl);
+                return;
+            }
+
+            var userDataDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "OBS Karaoke MVP",
+                "WebView2");
+            Directory.CreateDirectory(userDataDirectory);
+            var environment = await CoreWebView2Environment.CreateAsync(
+                userDataFolder: userDataDirectory);
+            await _webView.EnsureCoreWebView2Async(environment);
+            if (_closing) return;
+
+            var core = _webView.CoreWebView2
+                ?? throw new InvalidOperationException("WebView2 초기화가 완료되지 않았습니다.");
+            core.Settings.AreDevToolsEnabled = false;
+            core.Settings.AreDefaultContextMenusEnabled = false;
+            core.Settings.IsStatusBarEnabled = false;
+            core.ProcessFailed += (_, _) =>
+                BeginInvoke(() => ShowError("내장 화면이 중단되었습니다. 다시 시도해 주세요."));
+            core.NewWindowRequested += (_, args) => args.Handled = true;
+            _webView.NavigationCompleted += (_, args) =>
+            {
+                if (args.IsSuccess)
+                {
+                    _webViewReady = true;
+                    _webView.Visible = true;
+                    _loadingPanel.Visible = false;
+                    _reload.Enabled = true;
+                    _status.Text = $"실행 중 · OBS Overlay: {OverlayUrl}";
+                }
+                else
+                {
+                    ShowError($"조작 화면을 열지 못했습니다. ({args.WebErrorStatus})");
+                }
+            };
+            _webView.Source = new Uri(AppUrl);
+        }
+        catch (WebView2RuntimeNotFoundException)
+        {
+            ShowError("Microsoft Edge WebView2 Runtime이 없습니다. 최신 설치 프로그램으로 다시 설치해 주세요.");
+        }
+        catch (Exception error)
+        {
+            ShowError($"조작 화면을 준비하지 못했습니다: {error.Message}");
+        }
+        finally
+        {
+            _webViewInitializing = false;
+        }
+    }
+
+    private async Task ReloadControlPageAsync()
+    {
+        if (!IsPortOpen())
+        {
+            await RetryAsync();
+            return;
+        }
+
+        ShowLoading("조작 화면을 새로고침하는 중입니다...");
+        if (_webView.CoreWebView2 is not null)
+        {
+            _webView.CoreWebView2.Navigate(AppUrl);
+        }
+        else
+        {
+            await InitializeWebViewAsync();
+        }
+    }
+
+    private async Task RetryAsync()
+    {
+        _retry.Enabled = false;
+        _serverFailureCount = 0;
+        if (!IsPortOpen()) StartServer();
+        await PollServerAsync();
+        _retry.Enabled = true;
+    }
+
+    private void ShowLoading(string message)
+    {
+        if (_closing || IsDisposed) return;
+        _loadingMessage.Text = message;
+        _loadingProgress.Visible = true;
+        _retry.Visible = false;
+        _webView.Visible = false;
+        _loadingPanel.Visible = true;
+        _loadingPanel.BringToFront();
+    }
+
+    private void ShowError(string message)
+    {
+        if (_closing || IsDisposed) return;
+        _loadingMessage.Text = message;
+        _loadingProgress.Visible = false;
+        _retry.Visible = true;
+        _webViewReady = false;
+        _reload.Enabled = false;
+        _webView.Visible = false;
+        _loadingPanel.Visible = true;
+        _loadingPanel.BringToFront();
+        _status.Text = message;
+    }
+
     private void CloseAfterServerExit()
     {
         if (_closing || IsDisposed || !IsHandleCreated) return;
@@ -291,7 +385,7 @@ public sealed class LauncherForm : Form
         }
         catch (InvalidOperationException)
         {
-            // The launcher is already closing.
+            // The app is already closing.
         }
     }
 
@@ -313,7 +407,6 @@ public sealed class LauncherForm : Form
                 // Ignore invalid PATH entries.
             }
         }
-
         return null;
     }
 
@@ -332,22 +425,17 @@ public sealed class LauncherForm : Form
 
     private async Task PollServerAsync()
     {
+        if (_closing) return;
         try
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
             using var response = await client.GetAsync($"{AppUrl}api/state");
-            if (response.StatusCode == HttpStatusCode.OK)
-            {
-                _serverWasReady = true;
-                _serverFailureCount = 0;
-                _status.Text = $"실행 중입니다.\r\n조작 화면: {AppUrl}\r\nOBS Overlay: {OverlayUrl}";
-                _openApp.Enabled = true;
+            if (response.StatusCode != HttpStatusCode.OK) return;
 
-                if (!_controlPageOpened && OpenControlPage())
-                {
-                    _controlPageOpened = true;
-                }
-            }
+            _serverWasReady = true;
+            _serverFailureCount = 0;
+            _status.Text = $"실행 중 · OBS Overlay: {OverlayUrl}";
+            if (!_webViewReady) await InitializeWebViewAsync();
         }
         catch
         {
@@ -356,10 +444,8 @@ public sealed class LauncherForm : Form
             _serverFailureCount += 1;
             if (_serverProcess?.HasExited == true || _serverFailureCount >= 3)
             {
-                _status.Text = "로컬 서버가 종료되었습니다.";
-                _openApp.Enabled = false;
                 _pollTimer.Stop();
-                BeginInvoke(Close);
+                ShowError("로컬 서버가 종료되었습니다. 다시 시도해 주세요.");
             }
         }
     }
@@ -373,8 +459,8 @@ public sealed class LauncherForm : Form
             if (_serverProcess is { HasExited: false })
             {
                 _serverProcess.Kill(entireProcessTree: true);
-                _serverProcess.Dispose();
             }
+            _serverProcess?.Dispose();
         }
         catch
         {
@@ -392,7 +478,7 @@ public sealed class LauncherForm : Form
         }
         catch
         {
-            // The server may already be closed or blocked by another process.
+            // The server may already be closed.
         }
     }
 

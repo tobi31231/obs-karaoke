@@ -55,7 +55,9 @@ dotnet publish (Join-Path $repo "launcher\ObsKaraokeLauncher.csproj") `
     -o $launcherOutput
 if ($LASTEXITCODE -ne 0) { throw "Launcher build failed." }
 
-Copy-Item -LiteralPath (Join-Path $launcherOutput "OBS Karaoke MVP.exe") -Destination $OutputDirectory
+Copy-Item -Path (Join-Path $launcherOutput "*") -Destination $OutputDirectory -Recurse -Force
+Get-ChildItem -LiteralPath $OutputDirectory -Filter "*.pdb" -Recurse -Force |
+    Remove-Item -Force
 Copy-Item -LiteralPath (Join-Path $repo "server.js"),(Join-Path $repo "package.json"),
     (Join-Path $repo "requirements-whisper.txt"),(Join-Path $repo "README.md"),
     (Join-Path $repo "THIRD_PARTY_NOTICES.md") -Destination $OutputDirectory
@@ -66,6 +68,11 @@ Copy-Item -LiteralPath (Join-Path $repo "work\model_align.py"),
     (Join-Path $repo "work\download_cuda_runtime.py") -Destination (Join-Path $OutputDirectory "work")
 Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $OutputDirectory "node.exe")
 Copy-Item -LiteralPath $LicenseDirectory -Destination $OutputDirectory -Recurse
+if (Test-Path -LiteralPath (Join-Path $repo "licenses")) {
+    New-Item -ItemType Directory -Path (Join-Path $OutputDirectory "licenses") -Force | Out-Null
+    Copy-Item -Path (Join-Path $repo "licenses\*") `
+        -Destination (Join-Path $OutputDirectory "licenses") -Recurse -Force
+}
 
 & robocopy $PythonDirectory (Join-Path $OutputDirectory "python") /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP
 if ($LASTEXITCODE -ge 8) { throw "Python copy failed with code $LASTEXITCODE" }

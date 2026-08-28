@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Win32;
 
 namespace ObsKaraokeSetup;
 
@@ -35,6 +36,8 @@ public sealed class InstallerForm : Form
     private const string AppFolderName = "OBS Karaoke MVP";
     private const string RemoteManifestUrl =
         "https://github.com/tobi31231/obs-karaoke/releases/latest/download/release-manifest.json";
+    private const string WebView2BootstrapperUrl =
+        "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromHours(2) };
     private static readonly string DefaultInstallDirectory =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppFolderName);
@@ -302,6 +305,9 @@ public sealed class InstallerForm : Form
             Directory.CreateDirectory(downloadDirectory);
             var (manifest, manifestUri) = await LoadManifestAsync(_cancellation.Token);
 
+            _status.Text = "내장 조작 화면 구성요소 확인/설치 중...";
+            await EnsureWebView2RuntimeAsync(downloadDirectory, _cancellation.Token);
+
             foreach (var asset in manifest.Assets)
             {
                 _cancellation.Token.ThrowIfCancellationRequested();
@@ -431,6 +437,86 @@ public sealed class InstallerForm : Form
             useAsync: true);
         await source.CopyToAsync(destination, cancellationToken);
         return target;
+    }
+
+    private static async Task EnsureWebView2RuntimeAsync(
+        string downloadDirectory,
+        CancellationToken cancellationToken)
+    {
+        if (IsWebView2RuntimeInstalled()) return;
+
+        var bootstrapper = Path.Combine(downloadDirectory, "MicrosoftEdgeWebview2Setup.exe");
+        using (var response = await Http.GetAsync(
+                   WebView2BootstrapperUrl,
+                   HttpCompletionOption.ResponseHeadersRead,
+                   cancellationToken))
+        {
+            response.EnsureSuccessStatusCode();
+            await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using var destination = new FileStream(
+                bootstrapper,
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.None,
+                64 * 1024,
+                useAsync: true);
+            await source.CopyToAsync(destination, cancellationToken);
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = bootstrapper,
+            Arguments = "/silent /install",
+            WorkingDirectory = downloadDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        }) ?? throw new InvalidOperationException("WebView2 Runtime 설치 프로그램을 시작하지 못했습니다.");
+
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            throw;
+        }
+
+        if (process.ExitCode is not 0 and not 3010)
+        {
+            throw new InvalidOperationException(
+                $"WebView2 Runtime 설치에 실패했습니다. (종료 코드: {process.ExitCode})");
+        }
+    }
+
+    private static bool IsWebView2RuntimeInstalled()
+    {
+        const string clientPath =
+            @"SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+
+        foreach (var hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
+        {
+            foreach (var view in new[] { RegistryView.Registry32, RegistryView.Registry64 })
+            {
+                try
+                {
+                    using var baseKey = RegistryKey.OpenBaseKey(hive, view);
+                    using var key = baseKey.OpenSubKey(clientPath);
+                    var versionText = key?.GetValue("pv") as string;
+                    if (Version.TryParse(versionText, out var version) && version > new Version(0, 0, 0, 0))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    // Continue with the next registry hive/view.
+                }
+            }
+        }
+
+        return false;
     }
 
     private static async Task VerifyHashAsync(

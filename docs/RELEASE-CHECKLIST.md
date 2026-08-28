@@ -13,6 +13,6 @@
 - [ ] Korean alignment tested
 - [ ] Japanese alignment tested
 - [ ] OBS transparent overlay tested
-- [ ] Closing the control browser stops launcher and Node
+- [ ] Closing the app window stops WebView2, launcher, and Node
 - [ ] Clean Windows installation tested
 - [ ] SmartScreen/code-signing status documented
