@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OBS Karaoke MVP</title>
-    <link rel="stylesheet" href="/styles.css?v=20260823-mismatch-cancel-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260828-developer-logging-1" />
   </head>
   <body class="app-shell">
     <main class="workspace">
@@ -149,6 +149,22 @@
           </table>
         </div>
       </section>
+
+      <section id="developerPanel" class="panel developer-panel" hidden>
+        <div class="developer-head">
+          <div>
+            <h2>개발자 모드</h2>
+            <p id="developerSessionStatus" class="muted">진단 이벤트 0건 · 원문 미포함</p>
+          </div>
+          <div class="developer-actions">
+            <button id="exportDeveloperLog" type="button">진단 로그 내보내기</button>
+            <button id="clearDeveloperLog" type="button">로그 지우기</button>
+            <button id="closeDeveloperMode" type="button">닫기</button>
+          </div>
+        </div>
+        <div id="developerSummary" class="developer-summary"></div>
+        <pre id="developerLog" class="developer-log" aria-live="polite"></pre>
+      </section>
     </main>
 
     <div
@@ -174,6 +190,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260823-mismatch-cancel-1"></script>
+    <script src="/app.js?v=20260828-developer-logging-1"></script>
   </body>
 </html>

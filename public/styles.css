@@ -522,6 +522,81 @@ canvas {
   margin-top: 16px;
 }
 
+.developer-panel[hidden] {
+  display: none;
+}
+
+.developer-panel {
+  margin-top: 16px;
+  padding: 16px;
+  border-color: #4e6f69;
+}
+
+.developer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.developer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.developer-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.developer-metric {
+  min-width: 0;
+  background: #171c20;
+  padding: 10px 12px;
+}
+
+.developer-metric span,
+.developer-metric strong {
+  display: block;
+}
+
+.developer-metric span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.developer-metric strong {
+  margin-top: 3px;
+  color: var(--accent-2);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.developer-log {
+  min-height: 150px;
+  max-height: 360px;
+  overflow: auto;
+  margin: 12px 0 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1114;
+  color: #c8d2d8;
+  padding: 12px;
+  font: 0.78rem/1.5 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .table-wrap {
   overflow: auto;
   max-height: min(46vh, 560px);
@@ -711,7 +786,8 @@ td:first-child {
 @media (max-width: 1120px) {
   .topbar,
   .player-header,
-  .editor-head {
+  .editor-head,
+  .developer-head {
     align-items: stretch;
     flex-direction: column;
   }
@@ -722,6 +798,10 @@ td:first-child {
 
   .main-grid {
     grid-template-columns: 1fr;
+  }
+
+  .developer-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -742,8 +822,13 @@ td:first-child {
   .source-panel,
   .player-panel,
   .overlay-panel,
-  .editor-panel {
+  .editor-panel,
+  .developer-panel {
     padding: 12px;
+  }
+
+  .developer-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .analysis-loading-panel {

@@ -35,7 +35,14 @@ const elements = {
   shadow: document.querySelector("#shadow"),
   accent: document.querySelector("#accent"),
   textColor: document.querySelector("#textColor"),
-  alignButtons: document.querySelectorAll("[data-align]")
+  alignButtons: document.querySelectorAll("[data-align]"),
+  developerPanel: document.querySelector("#developerPanel"),
+  developerSessionStatus: document.querySelector("#developerSessionStatus"),
+  developerSummary: document.querySelector("#developerSummary"),
+  developerLog: document.querySelector("#developerLog"),
+  exportDeveloperLog: document.querySelector("#exportDeveloperLog"),
+  clearDeveloperLog: document.querySelector("#clearDeveloperLog"),
+  closeDeveloperMode: document.querySelector("#closeDeveloperMode")
 };
 
 const app = {
@@ -55,10 +62,20 @@ const app = {
   recoveringEarlyEnd: false,
   activeAlign: "center",
   previewKey: "",
-  previewSlots: []
+  previewSlots: [],
+  developerMode: false,
+  developerEvents: [],
+  developerEventSequence: 0,
+  developerSessionStartedAt: Date.now(),
+  developerBaseline: [],
+  developerAnalysis: null,
+  developerResultSource: null
 };
 
-const APP_VERSION = "20260823-mismatch-cancel-1";
+const APP_VERSION = "20260828-developer-logging-1";
+const DEVELOPER_TOGGLE_PRESS_COUNT = 5;
+const DEVELOPER_TOGGLE_WINDOW_MS = 2500;
+const DEVELOPER_EVENT_LIMIT = 1000;
 const CONTROL_SESSION_ID = typeof crypto.randomUUID === "function"
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -71,6 +88,7 @@ let analysisCancelRequested = false;
 let analysisCancelling = false;
 let controlSessionStream = null;
 let controlSessionClosing = false;
+let developerF12Presses = [];
 
 function openControlSession() {
   if (controlSessionStream && controlSessionStream.readyState !== EventSource.CLOSED) return;
@@ -105,6 +123,433 @@ function setStatus(message, isError = false) {
   if (!isError && elements.analysisLoading && !elements.analysisLoading.hidden) {
     elements.analysisLoadingMessage.textContent = message;
   }
+}
+
+function diagnosticNumber(value, digits = 3) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Number(number.toFixed(digits)) : null;
+}
+
+function normalizedDiagnosticLine(text) {
+  return String(text || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+function detectDiagnosticScript(text) {
+  const value = String(text || "");
+  const scripts = [];
+  if (/[\uac00-\ud7af]/u.test(value)) scripts.push("ko");
+  if (/[\u3040-\u30ff]/u.test(value)) scripts.push("ja");
+  if (/[\u3400-\u9fff]/u.test(value) && !scripts.includes("ja")) scripts.push("cjk");
+  if (/[A-Za-z]/u.test(value)) scripts.push("latin");
+  return scripts.length === 0 ? "other" : scripts.join("+");
+}
+
+const DIAGNOSTIC_TIMELINE_SOURCES = new Set([
+  "character",
+  "estimated",
+  "estimated-line",
+  "exact",
+  "forced-repeat",
+  "forced-text",
+  "fuzzy",
+  "global-anchors",
+  "measured",
+  "repeated-duration",
+  "repeated-pattern",
+  "segment",
+  "segment-sequence",
+  "separator",
+  "word",
+  "word+character"
+]);
+
+function sanitizeDiagnosticTimelineSource(source) {
+  const value = String(source || "unknown").trim().toLocaleLowerCase();
+  if (DIAGNOSTIC_TIMELINE_SOURCES.has(value)) return value;
+  for (const prefix of ["candidate-", "window-"]) {
+    if (!value.startsWith(prefix)) continue;
+    const nested = sanitizeDiagnosticTimelineSource(value.slice(prefix.length));
+    return nested === "other" ? "other" : `${prefix}${nested}`;
+  }
+  return "other";
+}
+
+function buildDiagnosticRepeatMetadata(lines) {
+  const groups = new Map();
+  for (const [index, line] of lines.entries()) {
+    const key = normalizedDiagnosticLine(line);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(index);
+  }
+
+  const result = Array.from({ length: lines.length }, () => ({
+    repeatGroup: null,
+    repeatOccurrence: null,
+    repeatCount: 1
+  }));
+  let groupNumber = 0;
+  for (const indexes of groups.values()) {
+    if (indexes.length < 2) continue;
+    groupNumber += 1;
+    indexes.forEach((lineIndex, occurrence) => {
+      result[lineIndex] = {
+        repeatGroup: groupNumber,
+        repeatOccurrence: occurrence + 1,
+        repeatCount: indexes.length
+      };
+    });
+  }
+  return result;
+}
+
+function buildDiagnosticLyricsSummary(lines = app.lines) {
+  const repeatMetadata = buildDiagnosticRepeatMetadata(lines);
+  const scripts = {};
+  let characters = 0;
+  let nonWhitespaceCharacters = 0;
+  for (const line of lines) {
+    const text = String(line || "");
+    const script = detectDiagnosticScript(text);
+    scripts[script] = (scripts[script] || 0) + 1;
+    characters += Array.from(text).length;
+    nonWhitespaceCharacters += Array.from(text.replace(/\s/gu, "")).length;
+  }
+  return {
+    lineCount: lines.length,
+    characterCount: characters,
+    nonWhitespaceCharacterCount: nonWhitespaceCharacters,
+    scriptLineCounts: scripts,
+    repeatedLineCount: repeatMetadata.filter((row) => row.repeatGroup !== null).length,
+    repeatedGroupCount: Math.max(0, ...repeatMetadata.map((row) => row.repeatGroup || 0))
+  };
+}
+
+function sanitizeDiagnosticTimeline(timeline = app.timeline, lines = app.lines) {
+  const repeatMetadata = buildDiagnosticRepeatMetadata(lines);
+  return timeline.map((row, index) => {
+    const lineIndex = Number.isInteger(Number(row.index)) ? Number(row.index) : index;
+    const text = String(lines[lineIndex] ?? row.text ?? "");
+    const repeat = repeatMetadata[lineIndex] || {
+      repeatGroup: null,
+      repeatOccurrence: null,
+      repeatCount: 1
+    };
+    return {
+      lineIndex,
+      start: diagnosticNumber(row.start),
+      end: diagnosticNumber(row.end),
+      duration: diagnosticNumber(Number(row.end) - Number(row.start)),
+      confidence: diagnosticNumber(row.confidence),
+      tokenConfidence: diagnosticNumber(row.tokenConfidence),
+      source: sanitizeDiagnosticTimelineSource(row.source),
+      characterCount: Array.from(text).length,
+      nonWhitespaceCharacterCount: Array.from(text.replace(/\s/gu, "")).length,
+      wordCount: text.trim() ? text.trim().split(/\s+/u).length : 0,
+      script: detectDiagnosticScript(text),
+      repeatGroup: repeat.repeatGroup,
+      repeatOccurrence: repeat.repeatOccurrence,
+      repeatCount: repeat.repeatCount,
+      anchor: Boolean(row.anchor)
+    };
+  });
+}
+
+function sanitizeDiagnosticAnalysis(result, source, elapsedMs) {
+  const compatibility = result?.compatibility || {};
+  const segmentation = result?.autoSegmentation || {};
+  return {
+    resultSource: source,
+    elapsedMs: diagnosticNumber(elapsedMs, 0),
+    engine: String(result?.engine || "unknown").slice(0, 80),
+    model: String(result?.model || "unknown").slice(0, 80),
+    device: String(result?.device || "unknown").slice(0, 24),
+    language: String(result?.language || "auto").slice(0, 24),
+    selectedVariant: String(result?.selectedVariant || "unknown").slice(0, 120),
+    alignmentMethod: String(result?.alignmentMethod || source || "unknown").slice(0, 160),
+    duration: diagnosticNumber(result?.duration ?? getProjectDuration()),
+    confidence: diagnosticNumber(result?.confidence),
+    quality: diagnosticNumber(result?.quality),
+    transcriptSegments: diagnosticNumber(result?.transcriptSegments, 0),
+    transcriptWords: diagnosticNumber(result?.transcriptWords, 0),
+    matchedLines: diagnosticNumber(result?.matchedLines, 0),
+    rescuedLines: diagnosticNumber(result?.rescuedLines, 0),
+    forcedLines: diagnosticNumber(result?.forcedLines, 0),
+    repeatedLines: diagnosticNumber(result?.repeatedLines, 0),
+    autoSegmentation: {
+      applied: Boolean(segmentation.applied),
+      originalLines: diagnosticNumber(segmentation.originalLines, 0),
+      resultLines: diagnosticNumber(segmentation.resultLines, 0)
+    },
+    compatibility: {
+      status: String(compatibility.status || "unknown").slice(0, 40),
+      score: diagnosticNumber(compatibility.score),
+      matchedLines: diagnosticNumber(compatibility.matchedLines, 0),
+      matchedRatio: diagnosticNumber(compatibility.matchedRatio),
+      quality: diagnosticNumber(compatibility.quality)
+    },
+    candidates: Array.isArray(result?.candidates)
+      ? result.candidates.slice(0, 24).map((candidate) => ({
+        variant: String(candidate.variant || "unknown").slice(0, 120),
+        alignmentMethod: String(candidate.alignmentMethod || "unknown").slice(0, 160),
+        matchedLines: diagnosticNumber(candidate.matchedLines, 0),
+        quality: diagnosticNumber(candidate.quality),
+        transcriptHealth: diagnosticNumber(candidate.transcriptHealth),
+        segments: diagnosticNumber(candidate.segments, 0)
+      }))
+      : []
+  };
+}
+
+function appendDeveloperEvent(type, data = {}) {
+  if (!app.developerMode) return;
+  app.developerEventSequence += 1;
+  app.developerEvents.push({
+    sequence: app.developerEventSequence,
+    elapsedMs: Math.max(0, Date.now() - app.developerSessionStartedAt),
+    type,
+    data
+  });
+  if (app.developerEvents.length > DEVELOPER_EVENT_LIMIT) {
+    app.developerEvents.splice(0, app.developerEvents.length - DEVELOPER_EVENT_LIMIT);
+  }
+  renderDeveloperPanel();
+}
+
+function resetDeveloperDiagnostics() {
+  app.developerEvents = [];
+  app.developerEventSequence = 0;
+  app.developerSessionStartedAt = Date.now();
+  app.developerBaseline = [];
+  app.developerAnalysis = null;
+  app.developerResultSource = null;
+  renderDeveloperPanel();
+}
+
+function beginDeveloperAnalysis(lines) {
+  resetDeveloperDiagnostics();
+  appendDeveloperEvent("analysis_started", {
+    media: {
+      sizeBytes: diagnosticNumber(app.audioFile?.size, 0),
+      mimeType: String(app.audioFile?.type || "unknown").slice(0, 80)
+    },
+    lyrics: buildDiagnosticLyricsSummary(lines)
+  });
+}
+
+function captureDeveloperBaseline(modelResult, source) {
+  const elapsedMs = analysisStartedAt ? Date.now() - analysisStartedAt : null;
+  app.developerResultSource = source;
+  app.developerAnalysis = sanitizeDiagnosticAnalysis(modelResult, source, elapsedMs);
+  app.developerBaseline = sanitizeDiagnosticTimeline();
+  appendDeveloperEvent("analysis_completed", {
+    resultSource: source,
+    elapsedMs: app.developerAnalysis.elapsedMs,
+    lineCount: app.developerBaseline.length,
+    matchedLines: app.developerAnalysis.matchedLines,
+    rescuedLines: app.developerAnalysis.rescuedLines,
+    forcedLines: app.developerAnalysis.forcedLines,
+    repeatedLines: app.developerAnalysis.repeatedLines,
+    quality: app.developerAnalysis.quality,
+    compatibilityScore: app.developerAnalysis.compatibility.score,
+    candidateCount: app.developerAnalysis.candidates.length,
+    autoSegmentation: app.developerAnalysis.autoSegmentation
+  });
+  for (const [candidateIndex, candidate] of app.developerAnalysis.candidates.entries()) {
+    appendDeveloperEvent("alignment_candidate", {
+      candidateIndex,
+      ...candidate,
+      selected: candidate.variant === app.developerAnalysis.selectedVariant
+    });
+  }
+  renderDeveloperPanel();
+}
+
+function summarizeDeveloperCorrections() {
+  const baselineByIndex = new Map(app.developerBaseline.map((row) => [row.lineIndex, row]));
+  const finalTimeline = sanitizeDiagnosticTimeline();
+  const deltas = finalTimeline
+    .map((row) => {
+      const baseline = baselineByIndex.get(row.lineIndex);
+      return baseline ? Number(row.start) - Number(baseline.start) : 0;
+    })
+    .filter(Number.isFinite);
+  const absoluteDeltas = deltas.map(Math.abs).sort((a, b) => a - b);
+  const corrected = absoluteDeltas.filter((value) => value >= 0.005);
+  const mean = corrected.length
+    ? corrected.reduce((total, value) => total + value, 0) / corrected.length
+    : 0;
+  const p95Index = Math.max(0, Math.ceil(absoluteDeltas.length * 0.95) - 1);
+  return {
+    finalTimeline,
+    correctedLines: corrected.length,
+    meanAbsoluteCorrection: diagnosticNumber(mean),
+    p95AbsoluteCorrection: diagnosticNumber(absoluteDeltas[p95Index] || 0),
+    maxAbsoluteCorrection: diagnosticNumber(absoluteDeltas.at(-1) || 0),
+    anchorCount: finalTimeline.filter((row) => row.anchor).length,
+    correctionActions: app.developerEvents.filter((event) => [
+      "line_start_adjusted",
+      "anchor_applied",
+      "timeline_shifted"
+    ].includes(event.type)).length
+  };
+}
+
+function summarizeTimelineMutation(beforeStarts) {
+  const deltas = app.timeline
+    .map((row, index) => Number(row.start) - Number(beforeStarts[index]))
+    .filter((value) => Number.isFinite(value) && Math.abs(value) >= 0.0005);
+  return {
+    affectedLines: deltas.length,
+    meanAbsoluteDelta: diagnosticNumber(
+      deltas.length ? deltas.reduce((total, value) => total + Math.abs(value), 0) / deltas.length : 0
+    ),
+    maxAbsoluteDelta: diagnosticNumber(Math.max(0, ...deltas.map(Math.abs)))
+  };
+}
+
+function renderDeveloperPanel() {
+  if (!elements.developerPanel) return;
+  elements.developerPanel.hidden = !app.developerMode;
+  if (!app.developerMode) return;
+
+  const corrections = summarizeDeveloperCorrections();
+  const analysis = app.developerAnalysis || {};
+  const compatibilityScore = analysis.compatibility?.score;
+  const compatibilityPercent = compatibilityScore !== null
+    && compatibilityScore !== undefined
+    && Number.isFinite(Number(compatibilityScore))
+    ? `${Math.round(Number(compatibilityScore) * 100)}%`
+    : "-";
+  const metrics = [
+    ["정렬 품질", analysis.quality ?? "-"],
+    ["AR/가사 일치", compatibilityPercent],
+    ["매칭 줄", `${analysis.matchedLines ?? 0}/${app.developerBaseline.length || app.lines.length || 0}`],
+    ["수정된 줄", corrections.correctedLines],
+    ["평균 보정", `${corrections.meanAbsoluteCorrection ?? 0}s`],
+    ["최대 보정", `${corrections.maxAbsoluteCorrection ?? 0}s`]
+  ];
+  const fragment = document.createDocumentFragment();
+  for (const [label, value] of metrics) {
+    const metric = document.createElement("div");
+    metric.className = "developer-metric";
+    const labelNode = document.createElement("span");
+    labelNode.textContent = label;
+    const valueNode = document.createElement("strong");
+    valueNode.textContent = String(value);
+    metric.append(labelNode, valueNode);
+    fragment.append(metric);
+  }
+  elements.developerSummary.replaceChildren(fragment);
+  elements.developerSessionStatus.textContent = `진단 이벤트 ${app.developerEvents.length}건 · 원문 미포함`;
+  elements.developerLog.textContent = app.developerEvents.length
+    ? app.developerEvents.slice(-200).map((event) => {
+      const seconds = (event.elapsedMs / 1000).toFixed(1).padStart(7, " ");
+      return `#${String(event.sequence).padStart(3, "0")} ${seconds}s ${event.type} ${JSON.stringify(event.data)}`;
+    }).join("\n")
+    : "진단 이벤트가 아직 없습니다.";
+}
+
+function setDeveloperMode(active) {
+  const next = Boolean(active);
+  if (app.developerMode === next) return;
+  if (next) {
+    app.developerMode = true;
+    if (!app.developerSessionStartedAt) app.developerSessionStartedAt = Date.now();
+    if (!app.developerBaseline.length && app.timeline.length) {
+      app.developerBaseline = sanitizeDiagnosticTimeline();
+      app.developerResultSource = "existing-timeline";
+    }
+    appendDeveloperEvent("developer_mode_enabled", {
+      hasTimeline: app.timeline.length > 0,
+      lineCount: app.timeline.length
+    });
+    setStatus("개발자 모드가 활성화되었습니다.");
+    elements.developerPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  appendDeveloperEvent("developer_mode_disabled");
+  app.developerMode = false;
+  renderDeveloperPanel();
+  setStatus("개발자 모드가 비활성화되었습니다.");
+}
+
+function registerDeveloperF12Press() {
+  const now = performance.now();
+  developerF12Presses = developerF12Presses.filter((pressedAt) => now - pressedAt <= DEVELOPER_TOGGLE_WINDOW_MS);
+  developerF12Presses.push(now);
+  if (developerF12Presses.length < DEVELOPER_TOGGLE_PRESS_COUNT) return;
+  developerF12Presses = [];
+  setDeveloperMode(!app.developerMode);
+}
+
+function exportDeveloperDiagnostics() {
+  const corrections = summarizeDeveloperCorrections();
+  const baselineByIndex = new Map(app.developerBaseline.map((row) => [row.lineIndex, row]));
+  const finalTimeline = corrections.finalTimeline.map((row) => {
+    const baseline = baselineByIndex.get(row.lineIndex);
+    return {
+      ...row,
+      automaticStart: baseline?.start ?? null,
+      automaticEnd: baseline?.end ?? null,
+      startCorrection: baseline ? diagnosticNumber(Number(row.start) - Number(baseline.start)) : null,
+      endCorrection: baseline ? diagnosticNumber(Number(row.end) - Number(baseline.end)) : null
+    };
+  });
+  const payload = {
+    schemaVersion: 1,
+    appVersion: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    privacy: {
+      includesAudio: false,
+      includesLyricsText: false,
+      includesFileNameOrPath: false,
+      includesUserIdentity: false
+    },
+    media: {
+      duration: diagnosticNumber(getProjectDuration()),
+      sizeBytes: diagnosticNumber(app.audioFile?.size, 0),
+      mimeType: String(app.audioFile?.type || "unknown").slice(0, 80)
+    },
+    lyrics: buildDiagnosticLyricsSummary(),
+    analysis: app.developerAnalysis,
+    automaticTimeline: app.developerBaseline,
+    finalTimeline,
+    summary: {
+      correctedLines: corrections.correctedLines,
+      correctionActions: corrections.correctionActions,
+      anchorCount: corrections.anchorCount,
+      meanAbsoluteCorrection: corrections.meanAbsoluteCorrection,
+      p95AbsoluteCorrection: corrections.p95AbsoluteCorrection,
+      maxAbsoluteCorrection: corrections.maxAbsoluteCorrection
+    },
+    events: app.developerEvents
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `obs-karaoke-diagnostic-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+  appendDeveloperEvent("diagnostic_exported", {
+    eventCount: app.developerEvents.length,
+    correctedLines: corrections.correctedLines
+  });
+}
+
+function clearDeveloperEvents() {
+  app.developerEvents = [];
+  app.developerEventSequence = 0;
+  app.developerSessionStartedAt = Date.now();
+  appendDeveloperEvent("event_log_cleared", {
+    baselinePreserved: app.developerBaseline.length > 0
+  });
 }
 
 function clearAnalysisConflict() {
@@ -815,7 +1260,7 @@ function renderTimeline() {
     input.min = "0";
     input.value = row.start.toFixed(2);
     input.addEventListener("change", () => {
-      adjustLineStart(row.index, Number(input.value) - row.start);
+      adjustLineStart(row.index, Number(input.value) - row.start, "manual-input");
     });
     startTd.append(input);
 
@@ -826,7 +1271,7 @@ function renderTimeline() {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = delta > 0 ? `+${delta}` : String(delta);
-      button.addEventListener("click", () => adjustLineStart(row.index, delta));
+      button.addEventListener("click", () => adjustLineStart(row.index, delta, "step-button"));
       nudgeGroup.append(button);
     }
     nudgeTd.append(nudgeGroup);
@@ -872,9 +1317,11 @@ function renderTimeline() {
   elements.timelineBody.append(fragment);
 }
 
-function adjustLineStart(index, delta) {
+function adjustLineStart(index, delta, method = "line-adjustment") {
   const row = app.timeline[index];
   if (!row) return;
+  const beforeStarts = app.developerMode ? app.timeline.map((item) => item.start) : [];
+  const beforeStart = row.start;
   const original = {
     start: row.start,
     end: row.end,
@@ -903,6 +1350,16 @@ function adjustLineStart(index, delta) {
   renderTimeline();
   drawWaveform();
   sendTimeline();
+  const adjusted = app.timeline[index];
+  appendDeveloperEvent("line_start_adjusted", {
+    lineIndex: index,
+    method,
+    requestedDelta: diagnosticNumber(delta),
+    beforeStart: diagnosticNumber(beforeStart),
+    afterStart: diagnosticNumber(adjusted?.start),
+    appliedDelta: diagnosticNumber(Number(adjusted?.start) - Number(beforeStart)),
+    ...summarizeTimelineMutation(beforeStarts)
+  });
 }
 
 function ensureBaseTimeline() {
@@ -985,6 +1442,8 @@ function rebuildTimelineFromAnchors() {
 
 function applyAnchor(index, time) {
   if (!app.timeline[index]) return;
+  const beforeStarts = app.developerMode ? app.timeline.map((row) => row.start) : [];
+  const beforeStart = app.timeline[index].start;
   ensureBaseTimeline();
   const duration = getProjectDuration();
   app.timeline[index].anchor = true;
@@ -996,10 +1455,18 @@ function applyAnchor(index, time) {
   drawWaveform();
   sendTimeline();
   setStatus(`앵커 적용: ${index + 1}번 줄을 ${formatTime(app.timeline[index].start)}에 고정했습니다.`);
+  appendDeveloperEvent("anchor_applied", {
+    lineIndex: index,
+    beforeStart: diagnosticNumber(beforeStart),
+    requestedStart: diagnosticNumber(time),
+    afterStart: diagnosticNumber(app.timeline[index].start),
+    ...summarizeTimelineMutation(beforeStarts)
+  });
 }
 
-function shiftRows(fromIndex, delta) {
+function shiftRows(fromIndex, delta, method = "timeline-shift") {
   if (!app.timeline.length) return;
+  const beforeStarts = app.developerMode ? app.timeline.map((row) => row.start) : [];
   ensureBaseTimeline();
   const duration = getProjectDuration();
   const shiftFrom = Math.max(0, Number(fromIndex) || 0);
@@ -1022,6 +1489,12 @@ function shiftRows(fromIndex, delta) {
   renderPreview();
   drawWaveform();
   sendTimeline();
+  appendDeveloperEvent("timeline_shifted", {
+    method,
+    fromLineIndex: shiftFrom,
+    requestedDelta: diagnosticNumber(delta),
+    ...summarizeTimelineMutation(beforeStarts)
+  });
 }
 
 async function decodeAudioFile(file) {
@@ -1166,6 +1639,7 @@ async function generateSync() {
       return;
     }
 
+    beginDeveloperAnalysis(lines);
     clearAnalysisConflict();
     analysisCancelRequested = false;
     analysisCancelling = false;
@@ -1210,6 +1684,18 @@ async function generateSync() {
 
     if (modelResult.code === "LYRICS_AUDIO_MISMATCH") {
       const compatibility = modelResult.compatibility || {};
+      app.developerAnalysis = sanitizeDiagnosticAnalysis(
+        modelResult,
+        "lyrics-audio-mismatch",
+        Date.now() - analysisStartedAt
+      );
+      appendDeveloperEvent("analysis_rejected", {
+        code: "LYRICS_AUDIO_MISMATCH",
+        compatibilityStatus: app.developerAnalysis.compatibility.status,
+        compatibilityScore: app.developerAnalysis.compatibility.score,
+        matchedLines: app.developerAnalysis.matchedLines,
+        quality: app.developerAnalysis.quality
+      });
       const percent = Math.round((Number(compatibility.score) || 0) * 100);
       const detail = `${modelResult.error || "오디오와 가사가 일치하지 않습니다."} 일치 점수 ${percent}%. 파일을 다시 확인하세요.`;
       showAnalysisConflict("AR/가사 불일치", detail);
@@ -1218,6 +1704,16 @@ async function generateSync() {
     }
 
     if (modelResult.code === "VOCAL_NOT_DETECTED") {
+      app.developerAnalysis = sanitizeDiagnosticAnalysis(
+        modelResult,
+        "vocal-not-detected",
+        Date.now() - analysisStartedAt
+      );
+      appendDeveloperEvent("analysis_rejected", {
+        code: "VOCAL_NOT_DETECTED",
+        compatibilityStatus: app.developerAnalysis.compatibility.status,
+        compatibilityScore: app.developerAnalysis.compatibility.score
+      });
       showAnalysisConflict(
         "보컬 인식 불가",
         modelResult.error || "보컬을 충분히 인식하지 못했습니다. AR/원곡 파일인지 확인하세요."
@@ -1237,6 +1733,7 @@ async function generateSync() {
       app.projectDuration = chooseDuration(getProjectDuration(), modelResult.duration);
       app.timeline = normalizeTimeline(modelResult.timeline || [], app.projectDuration);
       app.baseTimeline = cloneTimeline(app.timeline).map((row) => ({ ...row, anchor: false }));
+      captureDeveloperBaseline(modelResult, "turbo-model");
       absorbServerState({ ...modelResult, duration: app.projectDuration });
       elements.projectTitle.textContent = app.audioFile.name;
       elements.audioPlayer.currentTime = 0;
@@ -1263,6 +1760,7 @@ async function generateSync() {
 
     app.timeline = buildTimeline(lines, app.waveform);
     app.baseTimeline = cloneTimeline(app.timeline).map((row) => ({ ...row, anchor: false }));
+    captureDeveloperBaseline(modelResult, "local-phrase-fallback");
     const payload = {
       title: app.audioFile.name,
       duration: getProjectDuration(),
@@ -1289,10 +1787,17 @@ async function generateSync() {
       || error?.name === "AbortError"
       || error?.code === "ANALYSIS_CANCELLED"
     ) {
+      appendDeveloperEvent("analysis_cancelled", {
+        elapsedMs: diagnosticNumber(Date.now() - analysisStartedAt, 0)
+      });
       setStatus("분석을 종료했습니다. 오디오와 가사는 그대로 유지됩니다.");
       return;
     }
 
+    appendDeveloperEvent("analysis_failed", {
+      code: String(error?.code || error?.name || "UNKNOWN").slice(0, 80),
+      elapsedMs: diagnosticNumber(Date.now() - analysisStartedAt, 0)
+    });
     try {
       if (!app.waveform && app.audioBuffer) {
         app.waveform = analyzeAudioBuffer(app.audioBuffer);
@@ -1302,6 +1807,7 @@ async function generateSync() {
       }
       app.timeline = buildTimeline(lines, app.waveform);
       app.baseTimeline = cloneTimeline(app.timeline).map((row) => ({ ...row, anchor: false }));
+      captureDeveloperBaseline(null, "local-fallback-after-error");
       absorbServerState(await sendJson("/api/project", {
         title: app.audioFile.name,
         duration: getProjectDuration(),
@@ -1320,6 +1826,9 @@ async function generateSync() {
       drawWaveform();
       setStatus(`Turbo 모델 오류, 임시 싱크로 생성했습니다: ${error.message}`, true);
     } catch (fallbackError) {
+      appendDeveloperEvent("fallback_failed", {
+        code: String(fallbackError?.code || fallbackError?.name || "UNKNOWN").slice(0, 80)
+      });
       setStatus(`싱크 생성 실패: ${fallbackError.message}`, true);
     }
   } finally {
@@ -1354,11 +1863,13 @@ function exportProject() {
 async function importProject(file) {
   try {
     const project = JSON.parse(await file.text());
+    resetDeveloperDiagnostics();
     app.lines = Array.isArray(project.lyrics) ? project.lyrics : [];
     app.projectDuration = chooseDuration(project.duration, elements.audioPlayer.duration);
     app.timeline = normalizeTimeline(project.timeline || [], app.projectDuration);
     app.baseTimeline = normalizeTimeline(project.baseTimeline || project.timeline || [], app.projectDuration)
       .map((row) => ({ ...row, anchor: false }));
+    captureDeveloperBaseline(null, "imported-project");
     app.waveform = app.waveform || {
       duration: app.projectDuration,
       normalized: []
@@ -1398,6 +1909,7 @@ function animationLoop() {
 elements.audioFile.addEventListener("change", () => {
   const [file] = elements.audioFile.files;
   if (!file) return;
+  resetDeveloperDiagnostics();
   app.audioFile = file;
   app.projectDuration = 0;
   app.lastKnownAudioTime = 0;
@@ -1486,15 +1998,28 @@ elements.setSelectedToNow.addEventListener("click", () => {
 
 for (const button of elements.shiftAfterButtons) {
   button.addEventListener("click", () => {
-    shiftRows(app.selectedIndex, Number(button.dataset.shiftAfter) || 0);
+    shiftRows(app.selectedIndex, Number(button.dataset.shiftAfter) || 0, "shift-after-selected");
   });
 }
 
 for (const button of elements.shiftAllButtons) {
   button.addEventListener("click", () => {
-    shiftRows(0, Number(button.dataset.shiftAll) || 0);
+    shiftRows(0, Number(button.dataset.shiftAll) || 0, "shift-all");
   });
 }
+
+elements.exportDeveloperLog.addEventListener("click", exportDeveloperDiagnostics);
+elements.clearDeveloperLog.addEventListener("click", clearDeveloperEvents);
+elements.closeDeveloperMode.addEventListener("click", () => setDeveloperMode(false));
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "F12" || event.repeat) return;
+  event.preventDefault();
+  event.stopPropagation();
+  registerDeveloperF12Press();
+}, true);
+
+window.__obsKaraokeF12 = registerDeveloperF12Press;
 
 for (const input of [elements.fontSize, elements.showNext, elements.shadow, elements.accent, elements.textColor]) {
   input.addEventListener("input", updateStyle);
