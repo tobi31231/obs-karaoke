@@ -824,13 +824,30 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         ...snapshot(),
         ok: true,
+        engine: result.engine || "unknown",
         model: result.model || String(fields.model || "turbo"),
         device: result.device || "unknown",
+        language: result.language || "auto",
+        selectedVariant: result.selectedVariant || "unknown",
         alignmentMethod: result.alignmentMethod || "unknown",
         quality: Number(result.quality) || 0,
         transcriptSegments: result.transcriptSegments || 0,
         transcriptWords: result.transcriptWords || 0,
         matchedLines: result.matchedLines || 0,
+        rescuedLines: result.rescuedLines || 0,
+        forcedLines: result.forcedLines || 0,
+        repeatedLines: result.repeatedLines || 0,
+        autoSegmentation: result.autoSegmentation || null,
+        candidates: Array.isArray(result.candidates)
+          ? result.candidates.slice(0, 24).map((candidate) => ({
+            variant: String(candidate.variant || "unknown").slice(0, 120),
+            alignmentMethod: String(candidate.alignmentMethod || "unknown").slice(0, 160),
+            matchedLines: Number(candidate.matchedLines) || 0,
+            quality: Number(candidate.quality) || 0,
+            transcriptHealth: Number(candidate.transcriptHealth) || 0,
+            segments: Number(candidate.segments) || 0
+          }))
+          : [],
         compatibility: result.compatibility || null
       });
       return;

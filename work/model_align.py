@@ -1811,6 +1811,24 @@ def find_low_confidence_runs(timeline, threshold=0.35):
     return runs
 
 
+def lyrics_have_prefix_overlap(left, right):
+    left_key = normalized_text(left)
+    right_key = normalized_text(right)
+    if min(len(left_key), len(right_key)) < 4:
+        return False
+    return left_key.startswith(right_key) or right_key.startswith(left_key)
+
+
+def expand_prefix_overlap_run(lines, run_start, run_end):
+    start = run_start
+    end = run_end
+    if start > 0 and lyrics_have_prefix_overlap(lines[start - 1], lines[start]):
+        start -= 1
+    if end + 1 < len(lines) and lyrics_have_prefix_overlap(lines[end], lines[end + 1]):
+        end += 1
+    return start, end
+
+
 def refill_low_confidence_lines(timeline, duration, threshold=0.35):
     for row in timeline:
         if float(row.get("confidence", 0.0) or 0.0) >= threshold:
@@ -1944,7 +1962,11 @@ def force_align_low_confidence_windows(
             window_end = min(float(best.get("duration", 0.0) or 0.0), float(following["start"]) + 1.8)
         elif previous:
             estimated_span = min(29.0, max(10.0, (len(lines) - context_start + 1) * 2.65))
-            window_end = min(float(best.get("duration", 0.0) or 0.0), window_start + estimated_span)
+            duration = float(best.get("duration", 0.0) or 0.0)
+            if run_end == len(lines) - 1 and duration > window_start:
+                window_end = min(duration, window_start + 29.5)
+            else:
+                window_end = min(duration, window_start + estimated_span)
         else:
             window_end = min(float(best.get("duration", 0.0) or 0.0), window_start + 29.0)
 
@@ -2410,6 +2432,7 @@ def rescue_alignment_windows(
     rescued_lines = 0
     extra_words = 0
     for run_start, run_end in find_low_confidence_runs(timeline)[:max_windows]:
+        run_start, run_end = expand_prefix_overlap_run(lines, run_start, run_end)
         run_lines = lines[run_start:run_end + 1]
         previous = timeline[run_start - 1] if run_start > 0 else None
         following = timeline[run_end + 1] if run_end + 1 < len(timeline) else None
@@ -2417,10 +2440,13 @@ def rescue_alignment_windows(
             0.0,
             float(previous["end"]) - 0.45 if previous else float(timeline[run_start]["start"]) - 1.0
         )
-        window_end = min(
-            float(best.get("duration", 0.0) or 0.0),
-            float(following["start"]) + 0.45 if following else float(timeline[run_end]["end"]) + 1.0
-        )
+        duration = float(best.get("duration", 0.0) or 0.0)
+        if following:
+            window_end = min(duration, float(following["start"]) + 0.45)
+        elif run_end == len(lines) - 1 and duration > window_start:
+            window_end = min(duration, window_start + 29.5)
+        else:
+            window_end = min(duration, float(timeline[run_end]["end"]) + 1.0)
         if window_end - window_start < 0.8 or window_end - window_start > 35.0:
             continue
 
