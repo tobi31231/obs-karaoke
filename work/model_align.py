@@ -1811,6 +1811,26 @@ def find_low_confidence_runs(timeline, threshold=0.35):
     return runs
 
 
+def find_window_rescue_runs(timeline, threshold=0.35, candidate_threshold=0.7):
+    runs = []
+    start = None
+    for index, row in enumerate(timeline):
+        confidence = float(row.get("confidence", 0.0) or 0.0)
+        source = str(row.get("source", "") or "")
+        needs_rescue = (
+            confidence < threshold
+            or (source.startswith("candidate-") and confidence < candidate_threshold)
+        )
+        if needs_rescue and start is None:
+            start = index
+        elif not needs_rescue and start is not None:
+            runs.append((start, index - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(timeline) - 1))
+    return runs
+
+
 def lyrics_have_prefix_overlap(left, right):
     left_key = normalized_text(left)
     right_key = normalized_text(right)
@@ -2431,15 +2451,12 @@ def rescue_alignment_windows(
 
     rescued_lines = 0
     extra_words = 0
-    for run_start, run_end in find_low_confidence_runs(timeline)[:max_windows]:
+    for run_start, run_end in find_window_rescue_runs(timeline)[:max_windows]:
         run_start, run_end = expand_prefix_overlap_run(lines, run_start, run_end)
         run_lines = lines[run_start:run_end + 1]
         previous = timeline[run_start - 1] if run_start > 0 else None
         following = timeline[run_end + 1] if run_end + 1 < len(timeline) else None
-        window_start = max(
-            0.0,
-            float(previous["end"]) - 0.45 if previous else float(timeline[run_start]["start"]) - 1.0
-        )
+        window_start = max(0.0, float(previous["end"]) - 0.45) if previous else 0.0
         duration = float(best.get("duration", 0.0) or 0.0)
         if following:
             window_end = min(duration, float(following["start"]) + 0.45)
@@ -2648,7 +2665,7 @@ def run_alignment(audio_path, lyrics_path, model_name):
     best = merge_candidate_timelines(lines, candidates, best)
 
     rescued_lines = 0
-    if faster_available and best.get("matchedLines", 0) < len(lines):
+    if faster_available and find_window_rescue_runs(best.get("timeline", [])):
         best, faster_model, inference_device, rescued_lines, rescue_word_count = rescue_alignment_windows(
             audio_path,
             lines,
