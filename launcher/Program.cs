@@ -11,6 +11,12 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        using var instance = new Mutex(true, "Local\\OBS-Karaoke-Desktop", out var firstInstance);
+        if (!firstInstance)
+        {
+            MessageBox.Show("OBS Karaoke가 이미 실행 중입니다.", "OBS Karaoke MVP");
+            return;
+        }
         ApplicationConfiguration.Initialize();
         Application.Run(new LauncherForm());
     }
@@ -31,14 +37,20 @@ public sealed class LauncherForm : Form
     private readonly System.Windows.Forms.Timer _pollTimer = new();
 
     private Process? _serverProcess;
+    private Process? _browserProcess;
+    private readonly ProcessJob _ownedProcesses = new();
+    private readonly string _userDataDirectory = Path.Combine(Path.GetTempPath(), "OBS-Karaoke", Guid.NewGuid().ToString("N"));
     private bool _serverWasReady;
     private bool _webViewInitializing;
     private bool _webViewReady;
     private volatile bool _closing;
+    private bool _shutdownComplete;
+    private bool _polling;
     private int _serverFailureCount;
 
     public LauncherForm()
     {
+        ClearStaleProfiles();
         Text = "OBS Karaoke MVP";
         AutoScaleMode = AutoScaleMode.Dpi;
         var workingArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1366, 768);
@@ -184,10 +196,15 @@ public sealed class LauncherForm : Form
             _pollTimer.Start();
             await PollServerAsync();
         };
-        FormClosing += (_, _) =>
+        FormClosing += async (_, args) =>
         {
+            if (_shutdownComplete) return;
+            args.Cancel = true;
+            if (_closing) return;
             _closing = true;
             _pollTimer.Stop();
+            Enabled = false;
+            _status.Text = "앱과 분석 작업을 종료하는 중입니다...";
             try
             {
                 _webView.CoreWebView2?.Stop();
@@ -197,11 +214,52 @@ public sealed class LauncherForm : Form
             {
                 // The WebView may already have closed after a renderer failure.
             }
-            StopServer();
+            await Task.Run(() =>
+            {
+                StopServer();
+                try
+                {
+                    if (_browserProcess is { HasExited: false } && !_browserProcess.WaitForExit(2000))
+                        _browserProcess.Kill(entireProcessTree: true);
+                    _browserProcess?.WaitForExit(1000);
+                }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                finally
+                {
+                    _ownedProcesses.Dispose();
+                    _browserProcess?.Dispose();
+                }
+                try { Directory.Delete(_userDataDirectory, recursive: true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            });
+            _shutdownComplete = true;
+            Close();
         };
     }
 
     private static string AppDirectory => AppContext.BaseDirectory;
+
+    private static void ClearStaleProfiles()
+    {
+        // The single-instance mutex is held; these are only this app's crash leftovers.
+        var root = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "OBS-Karaoke"));
+        if (!Directory.Exists(root)) return;
+        foreach (var directory in Directory.EnumerateDirectories(root))
+        {
+            var fullPath = Path.GetFullPath(directory);
+            if (!fullPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || !Guid.TryParseExact(Path.GetFileName(fullPath), "N", out _)) continue;
+            try
+            {
+                if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) == 0)
+                    Directory.Delete(fullPath, recursive: true);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
 
     private static Button CreateToolbarButton(string text)
     {
@@ -222,7 +280,7 @@ public sealed class LauncherForm : Form
     {
         if (IsPortOpen())
         {
-            _status.Text = "이미 실행 중인 로컬 서버에 연결하는 중입니다...";
+            ShowError("5177 포트가 사용 중입니다. 이전 실행 앱을 종료한 뒤 다시 시도해 주세요.");
             return;
         }
 
@@ -241,7 +299,7 @@ public sealed class LauncherForm : Form
         }
 
         ShowLoading("로컬 서버를 시작하는 중입니다...");
-        _serverProcess = Process.Start(new ProcessStartInfo
+        var startInfo = new ProcessStartInfo
         {
             FileName = node,
             Arguments = "server.js",
@@ -249,9 +307,12 @@ public sealed class LauncherForm : Form
             UseShellExecute = false,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden
-        });
+        };
+        startInfo.Environment["OBS_KARAOKE_DESKTOP"] = "1";
+        _serverProcess = Process.Start(startInfo);
         if (_serverProcess is not null)
         {
+            _ownedProcesses.Add(_serverProcess);
             _serverProcess.EnableRaisingEvents = true;
             _serverProcess.Exited += (_, _) => CloseAfterServerExit();
         }
@@ -271,18 +332,17 @@ public sealed class LauncherForm : Form
                 return;
             }
 
-            var userDataDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "OBS Karaoke MVP",
-                "WebView2");
-            Directory.CreateDirectory(userDataDirectory);
+            Directory.CreateDirectory(_userDataDirectory);
             var environment = await CoreWebView2Environment.CreateAsync(
-                userDataFolder: userDataDirectory);
-            await _webView.EnsureCoreWebView2Async(environment);
+                userDataFolder: _userDataDirectory);
             if (_closing) return;
+            await _webView.EnsureCoreWebView2Async(environment);
+            if (_closing) { _webView.Dispose(); return; }
 
             var core = _webView.CoreWebView2
                 ?? throw new InvalidOperationException("WebView2 초기화가 완료되지 않았습니다.");
+            _browserProcess = Process.GetProcessById((int)core.BrowserProcessId);
+            _ownedProcesses.Add(_browserProcess);
             core.Settings.AreDevToolsEnabled = false;
             core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
@@ -425,7 +485,8 @@ public sealed class LauncherForm : Form
 
     private async Task PollServerAsync()
     {
-        if (_closing) return;
+        if (_closing || _polling || _serverProcess is null) return;
+        _polling = true;
         try
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
@@ -448,17 +509,19 @@ public sealed class LauncherForm : Form
                 ShowError("로컬 서버가 종료되었습니다. 다시 시도해 주세요.");
             }
         }
+        finally { _polling = false; }
     }
 
     private void StopServer()
     {
-        _pollTimer.Stop();
+        if (_serverProcess is null) return;
         RequestServerShutdown();
         try
         {
             if (_serverProcess is { HasExited: false })
             {
-                _serverProcess.Kill(entireProcessTree: true);
+                if (!_serverProcess.WaitForExit(1800)) _serverProcess.Kill(entireProcessTree: true);
+                _serverProcess.WaitForExit(1000);
             }
             _serverProcess?.Dispose();
         }

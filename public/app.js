@@ -15,7 +15,12 @@ const elements = {
   analysisConflictTitle: document.querySelector("#analysisConflictTitle"),
   analysisConflictMessage: document.querySelector("#analysisConflictMessage"),
   projectTitle: document.querySelector("#projectTitle"),
-  audioPlayer: document.querySelector("#audioPlayer"),
+  audioPlayer: new StemPlayer(),
+  mrFile: document.querySelector("#mrFile"),
+  trackStatus: document.querySelector("#trackStatus"),
+  playPause: document.querySelector("#playPause"),
+  seekPosition: document.querySelector("#seekPosition"),
+  karaokeFill: document.querySelector("#karaokeFill"),
   waveform: document.querySelector("#waveform"),
   currentTime: document.querySelector("#currentTime"),
   duration: document.querySelector("#duration"),
@@ -48,7 +53,11 @@ const elements = {
 const app = {
   audioFile: null,
   audioBuffer: null,
-  audioObjectUrl: null,
+  mrFile: null,
+  loadingTracks: 0,
+  trackVersions: { vocal: 0, mr: 0 },
+  sourceRevision: 0,
+  sourceUpdate: Promise.resolve(),
   waveform: null,
   lines: [],
   timeline: [],
@@ -72,7 +81,7 @@ const app = {
   developerResultSource: null
 };
 
-const APP_VERSION = "20260828-developer-logging-1";
+const APP_VERSION = "20260920-stems-1";
 const DEVELOPER_TOGGLE_PRESS_COUNT = 5;
 const DEVELOPER_TOGGLE_WINDOW_MS = 2500;
 const DEVELOPER_EVENT_LIMIT = 1000;
@@ -101,6 +110,7 @@ function openControlSession() {
 function closeControlSession() {
   if (controlSessionClosing) return;
   controlSessionClosing = true;
+  elements.audioPlayer.dispose();
   const closeUrl = `/api/control-session/close?sessionId=${encodeURIComponent(CONTROL_SESSION_ID)}`;
   let queued = false;
   try {
@@ -580,6 +590,7 @@ function setAnalysisLoading(active, message = "오디오를 준비하고 있습�
     analysisStartedAt = Date.now();
     elements.analysisLoadingMessage.textContent = message;
     elements.analysisLoading.hidden = false;
+    updateTrackControls();
     document.body.setAttribute("aria-busy", "true");
     updateAnalysisElapsed();
     clearInterval(analysisElapsedTimer);
@@ -1099,7 +1110,8 @@ function drawWaveform() {
   const displayDuration = getProjectDuration();
 
   if (app.waveform?.normalized?.length) {
-    const bars = Math.min(rect.width, app.waveform.normalized.length);
+    const waveformWidth = rect.width * Math.min(1, app.waveform.duration / Math.max(0.001, displayDuration));
+    const bars = Math.max(1, Math.min(waveformWidth, app.waveform.normalized.length));
     const step = app.waveform.normalized.length / bars;
     const center = rect.height / 2;
     ctx.fillStyle = "#6bd8c6";
@@ -1108,7 +1120,7 @@ function drawWaveform() {
       const index = Math.floor(x * step);
       const value = app.waveform.normalized[index] || 0;
       const height = Math.max(1, value * rect.height * 0.78);
-      ctx.fillRect(x, center - height / 2, 1, height);
+      ctx.fillRect(x * waveformWidth / bars, center - height / 2, Math.max(1, waveformWidth / bars), height);
     }
   }
 
@@ -1209,7 +1221,7 @@ function renderPreviewLine(row, time, placeholder) {
     if (/\s/.test(slot.token.text)) continue;
     const start = Number(slot.token.start) || row.start;
     const end = Math.max(start + 0.015, Number(slot.token.end) || start + 0.015);
-    const progress = slot.token.timed === false
+    const progress = !elements.karaokeFill.checked ? 0 : slot.token.timed === false
       ? (time >= start ? 1 : 0)
       : Math.max(0, Math.min(1, (time - start) / (end - start)));
     const quantized = Math.round(progress * 200) / 2;
@@ -1228,6 +1240,7 @@ function renderPreview() {
 
   renderPreviewLine(current || firstUpcoming, time, "가사가 여기에 표시됩니다.");
   elements.previewNext.textContent = secondUpcoming ? secondUpcoming.text : "";
+  elements.previewNext.hidden = !elements.showNext.checked;
   elements.currentTime.textContent = formatTime(time);
   elements.duration.textContent = formatTime(getProjectDuration());
 }
@@ -1498,12 +1511,7 @@ function shiftRows(fromIndex, delta, method = "timeline-shift") {
 }
 
 async function decodeAudioFile(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  const audioContext = new AudioContextClass();
-  const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-  await audioContext.close();
-  return decoded;
+  return elements.audioPlayer.decode(file);
 }
 
 async function sendJson(url, payload) {
@@ -1559,7 +1567,8 @@ function ensureAnalysisContinues() {
 
 async function runTurboModelAlignment(lines, duration, jobId) {
   const form = new FormData();
-  form.append("audio", app.audioFile, app.audioFile.name);
+  form.append("vocal", app.audioFile, app.audioFile.name);
+  form.append("inputKind", "vocal-stem");
   form.append("lyrics", lines.join("\n"));
   form.append("title", app.audioFile.name);
   form.append("duration", String(duration || 0));
@@ -1616,6 +1625,7 @@ async function postPlayback(action) {
 async function updateStyle() {
   elements.fontSizeValue.textContent = elements.fontSize.value;
   await sendJson("/api/style", {
+    karaokeFill: elements.karaokeFill.checked,
     showNext: elements.showNext.checked,
     fontSize: Number(elements.fontSize.value),
     accent: elements.accent.value,
@@ -1628,8 +1638,8 @@ async function updateStyle() {
 async function generateSync() {
   let lines = [];
   try {
-    if (!app.audioFile) {
-      setStatus("오디오 파일을 선택하세요.", true);
+    if (!app.audioFile || !app.mrFile || app.loadingTracks) {
+      setStatus("보컬과 MR 트랙을 모두 불러온 뒤 분석하세요.", true);
       return;
     }
 
@@ -1645,18 +1655,18 @@ async function generateSync() {
     analysisCancelling = false;
     activeAnalysisJobId = createAnalysisJobId();
     elements.generateSync.disabled = true;
-    const preparingMessage = "오디오를 읽고 Turbo 모델 분석을 준비하는 중입니다...";
+    elements.audioPlayer.pause();
+    const preparingMessage = "보컬 트랙의 음성 분석을 준비하는 중입니다...";
     setAnalysisLoading(true, preparingMessage);
     setStatus(preparingMessage);
 
     app.lines = lines;
     const mediaDuration = await waitForMediaDuration();
     ensureAnalysisContinues();
-    app.audioBuffer = await decodeAudioFile(app.audioFile);
+    app.audioBuffer = elements.audioPlayer.buffers.vocal;
     ensureAnalysisContinues();
     app.projectDuration = chooseDuration(mediaDuration, app.audioBuffer.duration);
-    app.waveform = analyzeAudioBuffer(app.audioBuffer);
-    app.waveform.duration = app.projectDuration || app.waveform.duration;
+    app.waveform ||= analyzeAudioBuffer(app.audioBuffer);
     app.selectedIndex = 0;
     app.timeline = [];
     app.baseTimeline = [];
@@ -1698,8 +1708,8 @@ async function generateSync() {
       });
       const percent = Math.round((Number(compatibility.score) || 0) * 100);
       const detail = `${modelResult.error || "오디오와 가사가 일치하지 않습니다."} 일치 점수 ${percent}%. 파일을 다시 확인하세요.`;
-      showAnalysisConflict("AR/가사 불일치", detail);
-      setStatus("분석 중단: AR 파일과 가사가 서로 다른 것으로 감지됐습니다.", true);
+      showAnalysisConflict("보컬/가사 불일치", detail);
+      setStatus("분석 중단: 보컬 트랙과 가사가 서로 다른 것으로 감지됐습니다.", true);
       return;
     }
 
@@ -1716,7 +1726,7 @@ async function generateSync() {
       });
       showAnalysisConflict(
         "보컬 인식 불가",
-        modelResult.error || "보컬을 충분히 인식하지 못했습니다. AR/원곡 파일인지 확인하세요."
+        "보컬을 충분히 인식하지 못했습니다. 음성이 있는 보컬 트랙인지 확인하세요."
       );
       setStatus("분석 중단: 보컬 인식 결과가 부족합니다.", true);
       return;
@@ -1758,29 +1768,8 @@ async function generateSync() {
       return;
     }
 
-    app.timeline = buildTimeline(lines, app.waveform);
-    app.baseTimeline = cloneTimeline(app.timeline).map((row) => ({ ...row, anchor: false }));
-    captureDeveloperBaseline(modelResult, "local-phrase-fallback");
-    const payload = {
-      title: app.audioFile.name,
-      duration: getProjectDuration(),
-      lyrics: lines,
-      timeline: app.timeline,
-      aligner: {
-        mode: "local-phrase-candidate-align-mvp",
-        confidence: app.waveform.phraseStarts?.length ? 0.7 : 0.58
-      }
-    };
-
-    absorbServerState(await sendJson("/api/project", payload));
-    elements.projectTitle.textContent = app.audioFile.name;
-    elements.audioPlayer.currentTime = 0;
-    app.lastKnownAudioTime = 0;
-    renderTimeline();
-    renderPreview();
-    drawWaveform();
     const installHint = modelResult.code === "MODEL_NOT_INSTALLED" ? " install-turbo-model.bat 실행 후 다시 시도하세요." : "";
-    setStatus(`Turbo 모델 사용 실패, 임시 싱크 생성: ${lines.length}줄.${installHint}`, Boolean(modelResult.code === "MODEL_NOT_INSTALLED"));
+    throw new Error(`${modelResult.error || "보컬 분석에 실패했습니다."}${installHint}`);
   } catch (error) {
     if (
       analysisCancelRequested
@@ -1798,42 +1787,10 @@ async function generateSync() {
       code: String(error?.code || error?.name || "UNKNOWN").slice(0, 80),
       elapsedMs: diagnosticNumber(Date.now() - analysisStartedAt, 0)
     });
-    try {
-      if (!app.waveform && app.audioBuffer) {
-        app.waveform = analyzeAudioBuffer(app.audioBuffer);
-      }
-      if (!lines.length) {
-        lines = app.lines;
-      }
-      app.timeline = buildTimeline(lines, app.waveform);
-      app.baseTimeline = cloneTimeline(app.timeline).map((row) => ({ ...row, anchor: false }));
-      captureDeveloperBaseline(null, "local-fallback-after-error");
-      absorbServerState(await sendJson("/api/project", {
-        title: app.audioFile.name,
-        duration: getProjectDuration(),
-        lyrics: lines,
-        timeline: app.timeline,
-        aligner: {
-          mode: "local-phrase-candidate-align-mvp",
-          confidence: app.waveform?.phraseStarts?.length ? 0.7 : 0.58
-        }
-      }));
-      elements.projectTitle.textContent = app.audioFile.name;
-      elements.audioPlayer.currentTime = 0;
-      app.lastKnownAudioTime = 0;
-      renderTimeline();
-      renderPreview();
-      drawWaveform();
-      setStatus(`Turbo 모델 오류, 임시 싱크로 생성했습니다: ${error.message}`, true);
-    } catch (fallbackError) {
-      appendDeveloperEvent("fallback_failed", {
-        code: String(fallbackError?.code || fallbackError?.name || "UNKNOWN").slice(0, 80)
-      });
-      setStatus(`싱크 생성 실패: ${fallbackError.message}`, true);
-    }
+    setStatus(`싱크 생성 실패: ${error.message}`, true);
   } finally {
     setAnalysisLoading(false);
-    elements.generateSync.disabled = false;
+    updateTrackControls();
     activeAnalysisController = null;
     activeAnalysisJobId = null;
     analysisCancelRequested = false;
@@ -1843,7 +1800,9 @@ async function generateSync() {
 
 function exportProject() {
   const project = {
-    version: 1,
+    version: 2,
+    inputKind: "vocal-stem",
+    style: { karaokeFill: elements.karaokeFill.checked },
     title: app.audioFile?.name || app.state?.title || "OBS Karaoke MVP",
     duration: getProjectDuration(),
     lyrics: app.lines,
@@ -1862,6 +1821,7 @@ function exportProject() {
 
 async function importProject(file) {
   try {
+    elements.audioPlayer.pause();
     const project = JSON.parse(await file.text());
     resetDeveloperDiagnostics();
     app.lines = Array.isArray(project.lyrics) ? project.lyrics : [];
@@ -1883,6 +1843,8 @@ async function importProject(file) {
       aligner: { mode: "imported-json", confidence: 1 }
     }));
     elements.projectTitle.textContent = project.title || "Imported project";
+    elements.karaokeFill.checked = project.style?.karaokeFill !== false;
+    await updateStyle();
     renderTimeline();
     renderPreview();
     drawWaveform();
@@ -1899,27 +1861,125 @@ function animationLoop() {
   }
 
   renderPreview();
-  drawWaveform();
+  if (app.lastWaveformTime !== currentTime) {
+    drawWaveform();
+    app.lastWaveformTime = currentTime;
+  }
+  elements.seekPosition.value = String(currentTime);
   if (!elements.audioPlayer.paused) {
     postPlayback("tick");
   }
   requestAnimationFrame(animationLoop);
 }
 
-elements.audioFile.addEventListener("change", () => {
-  const [file] = elements.audioFile.files;
+function updateTrackControls() {
+  const ready = Boolean(app.audioFile && app.mrFile && !app.loadingTracks);
+  const busy = !elements.analysisLoading.hidden;
+  elements.playPause.disabled = !ready || busy;
+  elements.seekPosition.disabled = !ready || busy;
+  elements.seekPosition.max = String(elements.audioPlayer.duration);
+  elements.generateSync.disabled = !ready || busy;
+  elements.audioFile.disabled = busy;
+  elements.mrFile.disabled = busy;
+  elements.lyricsFile.disabled = busy;
+  elements.lyricsText.disabled = busy;
+  elements.importProject.disabled = busy || app.loadingTracks > 0;
+}
+
+function publishSources() {
+  const revision = ++app.sourceRevision;
+  const payload = {
+    title: app.audioFile?.name || "OBS Karaoke MVP",
+    duration: elements.audioPlayer.duration,
+    lyrics: app.lines,
+    timeline: app.timeline,
+    aligner: app.timeline.length ? app.state?.aligner : { mode: "none", confidence: 0 }
+  };
+  // A slower decode or response must not restore an earlier song's state.
+  app.sourceUpdate = app.sourceUpdate.catch(() => {}).then(() => sendJson("/api/project", payload)).then(state => {
+    if (revision === app.sourceRevision) absorbServerState(state);
+  });
+  return app.sourceUpdate;
+}
+
+async function loadTrack(track, file) {
   if (!file) return;
-  resetDeveloperDiagnostics();
-  app.audioFile = file;
-  app.projectDuration = 0;
-  app.lastKnownAudioTime = 0;
-  if (app.audioObjectUrl) URL.revokeObjectURL(app.audioObjectUrl);
-  app.audioObjectUrl = URL.createObjectURL(file);
-  elements.audioPlayer.src = app.audioObjectUrl;
-  elements.projectTitle.textContent = file.name;
-  clearAnalysisConflict();
-  setStatus("가사를 선택한 뒤 자동 싱크를 생성하세요.");
+  const version = ++app.trackVersions[track];
+  ++app.loadingTracks;
+  elements.audioPlayer.pause();
+  elements.audioPlayer.setBuffer(track, null);
+  if (track === "vocal") {
+    app.audioFile = null;
+    app.audioBuffer = null;
+    app.waveform = null;
+    app.timeline = [];
+    app.baseTimeline = [];
+    resetDeveloperDiagnostics();
+  } else {
+    app.mrFile = null;
+  }
+  app.projectDuration = elements.audioPlayer.duration;
+  publishSources().catch(() => {});
+  updateTrackControls();
+  elements.trackStatus.textContent = `${track === "vocal" ? "보컬" : "MR"} 불러오는 중...`;
+  try {
+    const buffer = await decodeAudioFile(file);
+    if (version !== app.trackVersions[track] || controlSessionClosing) return;
+    elements.audioPlayer.setBuffer(track, buffer);
+    if (track === "vocal") {
+      app.audioFile = file;
+      app.audioBuffer = buffer;
+      app.waveform = analyzeAudioBuffer(buffer);
+      elements.projectTitle.textContent = file.name;
+    } else {
+      app.mrFile = file;
+    }
+    clearAnalysisConflict();
+    setStatus("가사를 선택한 뒤 자동 싱크를 생성하세요.");
+  } catch (error) {
+    if (version === app.trackVersions[track]) setStatus(`트랙을 읽지 못했습니다: ${error.message}`, true);
+  } finally {
+    app.projectDuration = elements.audioPlayer.duration;
+    app.lastKnownAudioTime = 0;
+    await publishSources().catch(() => {});
+    --app.loadingTracks;
+    updateTrackControls();
+    const buffers = elements.audioPlayer.buffers;
+    const gap = Math.abs((buffers.vocal?.duration || 0) - (buffers.mr?.duration || 0));
+    elements.trackStatus.textContent = app.loadingTracks ? "트랙 불러오는 중..."
+      : app.audioFile && app.mrFile
+        ? (gap > 0.5 ? `트랙 길이 차이 ${gap.toFixed(1)}초 · 같은 시작점인지 확인하세요.` : "보컬 · MR 준비됨")
+        : "보컬과 MR을 모두 선택하세요.";
+    renderTimeline();
+    renderPreview();
+    drawWaveform();
+  }
+}
+
+elements.audioFile.addEventListener("change", () => loadTrack("vocal", elements.audioFile.files[0]));
+elements.mrFile.addEventListener("change", () => loadTrack("mr", elements.mrFile.files[0]));
+elements.playPause.addEventListener("click", async () => {
+  try {
+    if (elements.audioPlayer.paused) await elements.audioPlayer.play();
+    else elements.audioPlayer.pause();
+  } catch (error) { setStatus(`재생 실패: ${error.message}`, true); }
 });
+elements.seekPosition.addEventListener("input", () => {
+  elements.audioPlayer.currentTime = Number(elements.seekPosition.value);
+});
+for (const track of ["vocal", "mr"]) {
+  const input = document.querySelector(`#${track}Volume`);
+  input.addEventListener("input", () => {
+    elements.audioPlayer.setVolume(track, Number(input.value) / 100);
+    document.querySelector(`#${track}VolumeValue`).textContent = `${input.value}%`;
+  });
+}
+for (const event of ["play", "pause", "ended"]) {
+  elements.audioPlayer.addEventListener(event, () => {
+    elements.playPause.firstElementChild.textContent = elements.audioPlayer.paused ? "▶" : "Ⅱ";
+    elements.playPause.setAttribute("aria-label", elements.audioPlayer.paused ? "재생" : "일시정지");
+  });
+}
 
 elements.lyricsFile.addEventListener("change", async () => {
   const [file] = elements.lyricsFile.files;
@@ -1954,26 +2014,7 @@ elements.audioPlayer.addEventListener("play", () => postPlayback("play"));
 elements.audioPlayer.addEventListener("pause", () => postPlayback("pause"));
 elements.audioPlayer.addEventListener("seeked", () => postPlayback("seek"));
 elements.audioPlayer.addEventListener("ratechange", () => postPlayback("seek"));
-elements.audioPlayer.addEventListener("ended", async () => {
-  const expectedDuration = getProjectDuration();
-  const resumeFrom = Math.max(positiveFinite(elements.audioPlayer.currentTime), app.lastKnownAudioTime);
-
-  if (app.recoveringEarlyEnd || expectedDuration <= 0 || resumeFrom <= 10 || resumeFrom >= expectedDuration - 5) {
-    return;
-  }
-
-  app.recoveringEarlyEnd = true;
-  try {
-    elements.audioPlayer.currentTime = Math.min(expectedDuration - 0.5, resumeFrom + 0.08);
-    await elements.audioPlayer.play();
-    await postPlayback("play");
-    setStatus(`재생이 ${formatTime(resumeFrom)}에서 조기 종료되어 이어서 재생했습니다.`);
-  } catch {
-    await postPlayback("pause");
-  } finally {
-    app.recoveringEarlyEnd = false;
-  }
-});
+elements.audioPlayer.addEventListener("ended", () => postPlayback("pause"));
 
 elements.restartPlayback.addEventListener("click", () => {
   elements.audioPlayer.currentTime = 0;
@@ -2021,7 +2062,7 @@ document.addEventListener("keydown", (event) => {
 
 window.__obsKaraokeF12 = registerDeveloperF12Press;
 
-for (const input of [elements.fontSize, elements.showNext, elements.shadow, elements.accent, elements.textColor]) {
+for (const input of [elements.karaokeFill, elements.fontSize, elements.showNext, elements.shadow, elements.accent, elements.textColor]) {
   input.addEventListener("input", updateStyle);
   input.addEventListener("change", updateStyle);
 }
@@ -2056,6 +2097,7 @@ fetch("/api/state")
     elements.fontSize.value = state.style?.fontSize || 56;
     elements.fontSizeValue.textContent = elements.fontSize.value;
     elements.showNext.checked = Boolean(state.style?.showNext ?? true);
+    elements.karaokeFill.checked = state.style?.karaokeFill !== false;
     elements.shadow.checked = Boolean(state.style?.shadow ?? true);
     elements.accent.value = state.style?.accent || "#f6d365";
     elements.textColor.value = state.style?.textColor || "#ffffff";
@@ -2069,5 +2111,6 @@ fetch("/api/state")
   })
   .catch(() => {});
 
+updateTrackControls();
 checkModelStatus();
 requestAnimationFrame(animationLoop);

@@ -465,6 +465,15 @@ canvas {
   margin-top: 14px;
 }
 
+.stem-transport { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+.stem-transport button { width: 44px; height: 40px; padding: 0; flex: none; }
+.stem-transport input { flex: 1; min-width: 0; }
+.stem-levels { display: grid; gap: 8px; margin-bottom: 14px; }
+.stem-levels label { display: grid; grid-template-columns: 40px minmax(0, 1fr) 48px; align-items: center; gap: 10px; }
+.stem-levels output { text-align: right; font-variant-numeric: tabular-nums; }
+.file-picker input { overflow: hidden; }
+.preview-current { font-size: 32px; overflow-wrap: anywhere; }
+
 .import-button {
   position: relative;
   overflow: hidden;

@@ -149,7 +149,7 @@ function setTokenProgress(time, row) {
     if (/\s/.test(slot.token.text)) continue;
     const start = Number(slot.token.start) || row.start;
     const end = Math.max(start + 0.015, Number(slot.token.end) || start + 0.015);
-    const progress = slot.token.timed === false
+    const progress = overlay.state?.style?.karaokeFill === false ? 0 : slot.token.timed === false
       ? (time >= start ? 1 : 0)
       : clamp((time - start) / (end - start), 0, 1);
     const quantized = Math.round(progress * 200) / 2;

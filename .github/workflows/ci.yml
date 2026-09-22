@@ -29,6 +29,10 @@ jobs:
           node --check server.js
           node --check public/app.js
           node --check public/overlay.js
+          node --check public/stem-player.js
+
+      - name: Test stem playback and server lifecycle
+        run: node --test tests/stem-player.test.js tests/server-stems.test.js
 
       - name: Check Python syntax
         run: python -m py_compile work/model_align.py work/download_model.py work/download_cuda_runtime.py

@@ -16,6 +16,7 @@ const MODEL_SCRIPT = path.join(__dirname, "work", "model_align.py");
 const clients = new Set();
 const controlSessions = new Map();
 const activeAlignmentJobs = new Map();
+const modelProcesses = new Set();
 const cancelledAlignmentJobs = new Set();
 let controlSessionSeen = false;
 let controlShutdownTimer = null;
@@ -85,6 +86,7 @@ function initialAligner() {
 function initialStyle() {
   return {
     showNext: true,
+    karaokeFill: true,
     fontSize: 56,
     accent: "#f6d365",
     textColor: "#ffffff",
@@ -331,6 +333,8 @@ function runModelAligner(args, options = {}) {
         ].join(path.delimiter)
       }
     });
+    modelProcesses.add(child);
+    child.once("close", () => modelProcesses.delete(child));
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -584,6 +588,9 @@ function shutdownSoon() {
   for (const [jobId] of activeAlignmentJobs) {
     cancelModelAlignment(jobId);
   }
+  for (const child of modelProcesses) {
+    if (!child.killed) child.kill();
+  }
   resetState();
   clearUploads();
   broadcast();
@@ -746,11 +753,11 @@ const server = http.createServer(async (req, res) => {
       fs.mkdirSync(UPLOAD_DIR, { recursive: true });
       const body = await readBuffer(req, MAX_UPLOAD_BYTES);
       const { fields, files } = parseMultipartBuffer(body, boundaryMatch[1] || boundaryMatch[2]);
-      const audio = files.audio;
+      const audio = files.vocal;
       const lyrics = String(fields.lyrics || "");
 
-      if (!audio) {
-        sendJson(res, 400, { ok: false, error: "Audio file is missing." });
+      if (!audio || fields.inputKind !== "vocal-stem" || files.mr || files.audio) {
+        sendJson(res, 400, { ok: false, error: "Select a vocal track for analysis. MR is playback-only." });
         return;
       }
 
@@ -875,6 +882,7 @@ const server = http.createServer(async (req, res) => {
       state.style = {
         ...state.style,
         showNext: Boolean(payload.showNext ?? state.style.showNext),
+        karaokeFill: Boolean(payload.karaokeFill ?? state.style.karaokeFill),
         fontSize: clamp(Number(payload.fontSize) || state.style.fontSize, 28, 96),
         accent: String(payload.accent || state.style.accent).slice(0, 32),
         textColor: String(payload.textColor || state.style.textColor).slice(0, 32),
@@ -905,7 +913,7 @@ const server = http.createServer(async (req, res) => {
 function listen(port) {
   server.removeAllListeners("error");
   server.once("error", (error) => {
-    if (error.code === "EADDRINUSE" && port < BASE_PORT + 20) {
+    if (error.code === "EADDRINUSE" && process.env.OBS_KARAOKE_DESKTOP !== "1" && port < BASE_PORT + 20) {
       listen(port + 1);
       return;
     }
@@ -937,5 +945,7 @@ const controlKeepAlive = setInterval(() => {
 }, 15000);
 controlKeepAlive.unref();
 
+process.on("SIGTERM", shutdownSoon);
+process.on("SIGINT", shutdownSoon);
 clearUploads();
 listen(BASE_PORT);
