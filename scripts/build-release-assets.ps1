@@ -3,6 +3,7 @@ param(
     [string]$Version = "v0.1.0-alpha",
     [string]$PortablePath,
     [string]$InstallerPath,
+    [string]$LauncherPath,
     [switch]$ReuseRuntimeAssets
 )
 
@@ -18,6 +19,7 @@ if (-not $InstallerPath) {
 
 $PortablePath = (Resolve-Path $PortablePath).Path
 $InstallerPath = (Resolve-Path $InstallerPath).Path
+if ($LauncherPath) { $LauncherPath = (Resolve-Path $LauncherPath).Path }
 $releaseRoot = Join-Path $workspace "release"
 $releaseDirectory = Join-Path $releaseRoot $Version
 $stagingRoot = Join-Path $workspace "build\asset-staging"
@@ -86,6 +88,9 @@ Copy-Tree $PortablePath $coreStaging @(
     (Join-Path $PortablePath "runtime"),
     (Join-Path $PortablePath "work\uploads")
 )
+if ($LauncherPath) {
+    Copy-Item -LiteralPath $LauncherPath -Destination (Join-Path $coreStaging "OBS Karaoke MVP.exe") -Force
+}
 if (-not $ReuseRuntimeAssets) {
     Copy-Tree (Join-Path $PortablePath "models") (Join-Path $modelStaging "models")
     Copy-Tree (Join-Path $PortablePath "runtime") (Join-Path $cudaStaging "runtime")
