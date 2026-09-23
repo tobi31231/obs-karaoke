@@ -7,6 +7,10 @@
 아래 `OBS-Karaoke-Setup.exe`를 내려받아 실행하세요. 기존 사용자도 앱을 완전히
 종료한 뒤 설치기를 다시 실행하고 기존 설치 폴더를 선택하면 됩니다.
 설치기는 앱 본체, Turbo 모델과 런타임을 준비하며 설치 후 분석은 로컬에서 실행됩니다.
+이전 버전에는 자동 업데이트 기능이 없어 이번에는 설치기를 한 번 다시 실행해야
+합니다. 그다음 패치부터 앱 실행 시 업데이트 알림이 나타납니다. 수락하면
+설치 파일을 검증하고 앱을 닫은 뒤 같은 폴더에 자동 설치합니다. 변경 없는
+모델·CUDA 파일은 다음 업데이트에서 로컬 설치본을 재사용합니다.
 GitHub의 `Source code` ZIP은 개발용 소스이며 실행용 패키지가 아닙니다.
 
 ## 변경 사항
@@ -29,6 +33,9 @@ Import separate vocal and instrumental tracks. Only the vocal is analyzed locall
 Both tracks share a playback clock with the transparent OBS lyric overlay.
 Includes individual track volumes, a karaoke-fill toggle, and improved desktop
 shutdown cleanup. Keep both stems aligned to the same original start time.
+
+Re-run the installer once to enable future in-app update prompts. On later
+updates, the app downloads and verifies the installer, then reopens after setup.
 
 Download `OBS-Karaoke-Setup.exe` below. Close the existing app before reinstalling
 into the same folder. Source archives are for development, not ready-to-run apps.

@@ -42,3 +42,6 @@ jobs:
         run: |
           dotnet build launcher/ObsKaraokeLauncher.csproj -c Release
           dotnet build installer/ObsKaraokeSetup.csproj -c Release
+
+      - name: Test update detection and runtime reuse
+        run: dotnet run --project tests/update-flow/UpdateFlowChecks.csproj -c Release

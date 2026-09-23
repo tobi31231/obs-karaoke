@@ -18,7 +18,9 @@ internal static class Program
             return;
         }
         ApplicationConfiguration.Initialize();
-        Application.Run(new LauncherForm());
+        using var form = new LauncherForm();
+        Application.Run(form);
+        form.StartPendingUpdate();
     }
 }
 
@@ -26,6 +28,10 @@ public sealed class LauncherForm : Form
 {
     private const string AppUrl = "http://127.0.0.1:5177/";
     private const string OverlayUrl = "http://127.0.0.1:5177/overlay?v=20260823-mismatch-cancel-1";
+    private const string ManifestUrl =
+        "https://github.com/tobi31231/obs-karaoke/releases/latest/download/release-manifest.json";
+    private const string InstallerUrl =
+        "https://github.com/tobi31231/obs-karaoke/releases/latest/download/OBS-Karaoke-Setup.exe";
 
     private readonly Label _status = new();
     private readonly Label _loadingMessage = new();
@@ -35,6 +41,7 @@ public sealed class LauncherForm : Form
     private readonly WebView2 _webView = new();
     private readonly Panel _loadingPanel = new();
     private readonly System.Windows.Forms.Timer _pollTimer = new();
+    private readonly CancellationTokenSource _updateCancellation = new();
 
     private Process? _serverProcess;
     private Process? _browserProcess;
@@ -46,6 +53,7 @@ public sealed class LauncherForm : Form
     private volatile bool _closing;
     private bool _shutdownComplete;
     private bool _polling;
+    private string? _pendingInstaller;
     private int _serverFailureCount;
 
     public LauncherForm()
@@ -195,6 +203,7 @@ public sealed class LauncherForm : Form
             StartServer();
             _pollTimer.Start();
             await PollServerAsync();
+            _ = CheckForUpdatesAsync();
         };
         FormClosing += async (_, args) =>
         {
@@ -202,6 +211,7 @@ public sealed class LauncherForm : Form
             args.Cancel = true;
             if (_closing) return;
             _closing = true;
+            _updateCancellation.Cancel();
             _pollTimer.Stop();
             Enabled = false;
             _status.Text = "앱과 분석 작업을 종료하는 중입니다...";
@@ -240,6 +250,68 @@ public sealed class LauncherForm : Form
     }
 
     private static string AppDirectory => AppContext.BaseDirectory;
+
+    private async Task CheckForUpdatesAsync()
+    {
+        var receipt = Path.Combine(AppDirectory, "release-manifest.json");
+        if (!File.Exists(receipt)) return;
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            var update = await UpdateChecker.CheckAsync(receipt, new Uri(ManifestUrl),
+                new Uri(InstallerUrl), client, _updateCancellation.Token);
+            if (update is null || _closing) return;
+
+            var choice = MessageBox.Show(this,
+                $"새 패치가 있습니다 ({update.Version}). 지금 설치하시겠습니까?\n진행 중인 작업은 종료됩니다.",
+                "OBS Karaoke MVP 업데이트", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (choice != DialogResult.Yes || _closing) return;
+
+            _status.Text = "업데이트 설치 파일 다운로드 및 검증 중...";
+            var folder = Path.Combine(Path.GetTempPath(), $"obs-karaoke-update-{Guid.NewGuid():N}");
+            var installer = Path.Combine(folder, "OBS-Karaoke-Setup.exe");
+            using var downloadClient = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+            var progress = new Progress<(long Downloaded, long? Total)>(item =>
+            {
+                if (_closing) return;
+                var current = item.Downloaded / 1048576;
+                var total = item.Total.HasValue ? $" / {item.Total.Value / 1048576} MB" : " MB";
+                _status.Text = $"업데이트 다운로드 중: {current}{total}";
+            });
+            await UpdateChecker.DownloadInstallerAsync(update, installer, downloadClient,
+                _updateCancellation.Token, progress);
+            if (_closing) return;
+            _pendingInstaller = installer;
+            Close();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (_closing) return;
+            _status.Text = "업데이트 확인/다운로드에 실패했습니다. 현재 버전은 계속 사용할 수 있습니다.";
+            MessageBox.Show(this, error.Message, "업데이트 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    public void StartPendingUpdate()
+    {
+        if (_pendingInstaller is null) return;
+        var info = new ProcessStartInfo
+        {
+            FileName = _pendingInstaller,
+            WorkingDirectory = Path.GetDirectoryName(_pendingInstaller)!,
+            UseShellExecute = true
+        };
+        info.ArgumentList.Add("--install-dir");
+        info.ArgumentList.Add(Path.TrimEndingDirectorySeparator(AppDirectory));
+        info.ArgumentList.Add("--auto-install");
+        try { Process.Start(info); }
+        catch (Exception error)
+        {
+            MessageBox.Show($"설치기를 열지 못했습니다: {error.Message}\n{_pendingInstaller}",
+                "업데이트 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
 
     private static void ClearStaleProfiles()
     {

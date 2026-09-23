@@ -134,6 +134,7 @@ $manifestAssets = foreach ($definition in $assetDefinitions) {
 
 $manifest = [ordered]@{
     version = $Version.TrimStart("v")
+    installerSha256 = (Get-FileHash -LiteralPath $setupDestination -Algorithm SHA256).Hash
     assets = @($manifestAssets)
 }
 $manifestPath = Join-Path $releaseDirectory "release-manifest.json"

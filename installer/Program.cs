@@ -27,7 +27,9 @@ internal static class Program
         }
 
         ApplicationConfiguration.Initialize();
-        Application.Run(new InstallerForm());
+        var target = args.SkipWhile(value => value != "--install-dir").Skip(1).FirstOrDefault();
+        var autoInstall = args.Contains("--auto-install", StringComparer.OrdinalIgnoreCase);
+        Application.Run(new InstallerForm(target, autoInstall));
     }
 }
 
@@ -48,10 +50,12 @@ public sealed class InstallerForm : Form
     private readonly ProgressBar _progress = new();
     private readonly Button _install = new();
     private readonly Button _cancel = new();
+    private readonly bool _autoInstall;
     private CancellationTokenSource? _cancellation;
 
-    public InstallerForm()
+    public InstallerForm(string? installDirectory = null, bool autoInstall = false)
     {
+        _autoInstall = autoInstall;
         Text = "OBS Karaoke MVP 설치";
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScroll = true;
@@ -98,7 +102,7 @@ public sealed class InstallerForm : Form
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 7)
         };
-        _installPath.Text = DefaultInstallDirectory;
+        _installPath.Text = installDirectory ?? DefaultInstallDirectory;
         _installPath.Dock = DockStyle.Fill;
         _installPath.Margin = new Padding(0, 3, 8, 3);
         _browse.Text = "찾아보기...";
@@ -158,6 +162,7 @@ public sealed class InstallerForm : Form
 
         AcceptButton = _install;
         CancelButton = _cancel;
+        if (autoInstall) Shown += async (_, _) => await InstallAsync();
     }
 
     private void ChooseInstallDirectory()
@@ -304,6 +309,17 @@ public sealed class InstallerForm : Form
             staging = CreateStagingDirectory(installDirectory);
             Directory.CreateDirectory(downloadDirectory);
             var (manifest, manifestUri) = await LoadManifestAsync(_cancellation.Token);
+            var existingManifestPath = Path.Combine(installDirectory, "release-manifest.json");
+            ReleaseManifest? installedManifest = null;
+            try
+            {
+                if (File.Exists(existingManifestPath))
+                    installedManifest = DeserializeManifest(await File.ReadAllTextAsync(existingManifestPath, _cancellation.Token));
+            }
+            catch (Exception error) when (error is IOException or JsonException or InvalidDataException)
+            {
+                // An older installation can still be updated with fresh downloads.
+            }
 
             _status.Text = "내장 조작 화면 구성요소 확인/설치 중...";
             await EnsureWebView2RuntimeAsync(downloadDirectory, _cancellation.Token);
@@ -311,6 +327,22 @@ public sealed class InstallerForm : Form
             foreach (var asset in manifest.Assets)
             {
                 _cancellation.Token.ThrowIfCancellationRequested();
+                var reusableDirectory = asset.Name switch
+                {
+                    "obs-karaoke-turbo-model.zip" => "models",
+                    "obs-karaoke-cuda-runtime-win-x64.zip" => "runtime",
+                    _ => null
+                };
+                var installedAsset = installedManifest?.Assets.FirstOrDefault(item => item.Name == asset.Name);
+                if (reusableDirectory is not null && LocalAssetReuse.CanReuse(
+                        Path.Combine(installDirectory, reusableDirectory), asset.Sha256, installedAsset?.Sha256))
+                {
+                    _status.Text = $"기존 파일 재사용 중: {reusableDirectory}";
+                    await Task.Run(() => LocalAssetReuse.CopyTree(
+                        Path.Combine(installDirectory, reusableDirectory),
+                        Path.Combine(staging, reusableDirectory), _cancellation.Token), _cancellation.Token);
+                    continue;
+                }
                 _status.Text = $"받는 중: {asset.Name}";
                 var archive = await GetAssetAsync(asset, manifestUri, downloadDirectory, _cancellation.Token);
                 await VerifyHashAsync(archive, asset.Sha256, _cancellation.Token);
@@ -323,6 +355,10 @@ public sealed class InstallerForm : Form
             {
                 throw new InvalidDataException("설치 패키지에 실행 파일이 없습니다.");
             }
+
+            await File.WriteAllTextAsync(
+                Path.Combine(staging, "release-manifest.json"),
+                JsonSerializer.Serialize(manifest), _cancellation.Token);
 
             _status.Text = "설치 마무리 중...";
             InstallStagingDirectory(staging, installDirectory);
@@ -341,6 +377,7 @@ public sealed class InstallerForm : Form
                 WorkingDirectory = installDirectory,
                 UseShellExecute = true
             });
+            if (_autoInstall) Close();
         }
         catch (OperationCanceledException)
         {
@@ -631,6 +668,7 @@ public sealed class InstallerForm : Form
 public sealed class ReleaseManifest
 {
     public string Version { get; set; } = "";
+    public string InstallerSha256 { get; set; } = "";
     public List<ReleaseAsset> Assets { get; set; } = [];
 }
 
